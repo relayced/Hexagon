@@ -14,30 +14,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 )
 
 const (
 	ScriptVersion = "1.4.2"
 	VersionURL    = "https://raw.githubusercontent.com/relayced/Hexagon/main/version.txt"
+	AuthAPIURL    = "https://nefarious-auth.johnlhoydbugayyy.workers.dev"
 	LogFileName   = "farming_log.txt"
-
-	// ========================================================================
-	// CENTRALIZED TERMINAL UI & DASHBOARD CONFIGURATION
-	// ========================================================================
-	DASHBOARD_MAX_WIDTH         = 76
-	DASHBOARD_MIN_WIDTH         = 40
-	TERMINAL_SAFETY_MARGIN      = 2
-	CENTER_DASHBOARD            = true
-	CENTER_DASHBOARD_VERTICALLY = false
-	WRAP_LONG_VALUES            = true
-	SHORTEN_LONG_VALUES         = true
 )
 
 // ANSI Color Palette
@@ -65,17 +53,15 @@ var allPackages = []string{
 
 // Global runtime configurations
 var (
-	licenseKey      = "Free"
-	licenseDuration = "Free"
-	isUniversalKey  bool
+	licenseKey      string
+	licenseDuration string
 	myHWID          string
 	discordWebhook  string
-	discordMention  string
 	gameName        string
 	gameURL         string
 	cloneCount      int
-	enableRejoin   bool
-	activePackages []string
+	enableRejoin    bool
+	activePackages  []string
 
 	serverPlaceID  string
 	serverGameName string
@@ -91,9 +77,6 @@ var (
 	recoveringClones   = make(map[string]bool)
 	recoveringMu       sync.Mutex
 
-	cloneRecoveryCooldown   = make(map[string]time.Time)
-	cloneRecoveryCooldownMu sync.Mutex
-
 	networkMu     sync.RWMutex
 	networkOnline = true
 
@@ -103,106 +86,11 @@ var (
 	recentlyLaunchedMu  sync.Mutex
 )
 
-// State helpers to prevent spam reopening and duplicate crash/disconnect triggers
-func isCloneRecoveringOrCooldown(pkg string) bool {
-	recoveringMu.Lock()
-	if recoveringClones[pkg] {
-		recoveringMu.Unlock()
-		return true
-	}
-	recoveringMu.Unlock()
-
-	cloneRecoveryCooldownMu.Lock()
-	defer cloneRecoveryCooldownMu.Unlock()
-	if expireTime, exists := cloneRecoveryCooldown[pkg]; exists {
-		if time.Now().Before(expireTime) {
-			return true
-		}
-		delete(cloneRecoveryCooldown, pkg)
-	}
-	return false
-}
-
-func setCloneRecoveryCooldown(pkg string, d time.Duration) {
-	cloneRecoveryCooldownMu.Lock()
-	cloneRecoveryCooldown[pkg] = time.Now().Add(d)
-	cloneRecoveryCooldownMu.Unlock()
-}
-
-// Health and Stagnant RAM watchdog tracking
-type cloneHealthInfo struct {
-	lastRAM        int
-	stagnantCycles int
-	lastPID        int
-	zeroCycles     int
-	launchedAt     time.Time
-}
-
-var (
-	cloneHealthStore = make(map[string]*cloneHealthInfo)
-	cloneHealthMu    sync.Mutex
-)
-
-func markCloneLaunched(pkg string) {
-	cloneHealthMu.Lock()
-	cloneHealthStore[pkg] = &cloneHealthInfo{
-		launchedAt: time.Now(),
-	}
-	cloneHealthMu.Unlock()
-}
-
-// hideSoftKeyboard safely ensures keyboard does not disrupt windows without sending intrusive keyevents to running games.
-func hideSoftKeyboard() {
-	// Intentionally omitted keyevent 111 (ESCAPE) to avoid triggering Roblox in-game exit/leave modal
-}
-
-// isProcessAlive checks whether the process PID exists in kernel procfs and is not a zombie.
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	statPath := fmt.Sprintf("/proc/%d/stat", pid)
-	data, err := os.ReadFile(statPath)
-	if err != nil && checkRoot() {
-		out, rErr := exec.Command("su", "-c", "cat "+statPath).Output()
-		if rErr == nil {
-			data = out
-			err = nil
-		}
-	}
-	if err != nil || len(data) == 0 {
-		return false
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) >= 3 {
-		state := fields[2]
-		if state == "Z" { // Zombie process
-			return false
-		}
-	}
-	return true
-}
-
-
-
 // ============================================================================
 // ANIMATED SPINNER & THREAD-SAFE CONSOLE SUBSYSTEM
 // ============================================================================
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-var renderMu sync.Mutex
-
-type launchCardStateInfo struct {
-	sync.Mutex
-	Active      bool
-	ActiveClone int
-	TotalClones int
-	Phase       string
-	Detail      string
-}
-
-var currentLaunchCard launchCardStateInfo
 
 type spinnerState struct {
 	label     string
@@ -216,25 +104,15 @@ func (s *spinnerState) renderUnsafe() {
 	if s.done {
 		return
 	}
-	dashboardMu.Lock()
-	monitoring := isMonitoringActive
-	dashboardMu.Unlock()
-	currentLaunchCard.Lock()
-	launchActive := currentLaunchCard.Active
-	currentLaunchCard.Unlock()
-	if monitoring || launchActive {
-		return
-	}
-	pad := getMenuLeftPad()
 	frame := spinnerFrames[s.frameIdx%len(spinnerFrames)]
 	if s.remaining >= 0 {
-		fmt.Printf("\r\033[K%s  %s%s%s %-36s %s[%2ds]%s", pad, Cyan, frame, NC, s.label, White, s.remaining, NC)
+		fmt.Printf("\r\033[K  %s%s%s %-38s %s[%2ds]%s", Cyan, frame, NC, s.label, White, s.remaining, NC)
 	} else {
-		fmt.Printf("\r\033[K%s  %s%s%s %s", pad, Cyan, frame, NC, s.label)
+		fmt.Printf("\r\033[K  %s%s%s %s", Cyan, frame, NC, s.label)
 	}
 }
 
-// safeLog cleanly logs a message, erasing any active spinner frame, printing the log with centered padding,
+// safeLog cleanly logs a message, erasing any active spinner frame, printing the log with a newline,
 // and redrawing the active spinner beneath it. This prevents any log interleaving or collisions.
 func safeLog(format string, a ...interface{}) {
 	consoleMu.Lock()
@@ -244,31 +122,11 @@ func safeLog(format string, a ...interface{}) {
 		fmt.Print("\r\033[K")
 	}
 
-	dashboardMu.Lock()
-	active := isMonitoringActive
-	dashboardMu.Unlock()
-
-	if active {
-		msg := fmt.Sprintf(format, a...)
-		writeLog("SENTINEL", msg)
-		return
+	msg := fmt.Sprintf(format, a...)
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
 	}
-
-	pad := getMenuLeftPad()
-	rawMsg := fmt.Sprintf(format, a...)
-	lines := strings.Split(rawMsg, "\n")
-	var sb strings.Builder
-	for i, line := range lines {
-		if i == len(lines)-1 && line == "" {
-			continue
-		}
-		if line != "" {
-			sb.WriteString(pad)
-			sb.WriteString(line)
-		}
-		sb.WriteString("\n")
-	}
-	fmt.Print(sb.String())
+	fmt.Print(msg)
 
 	if activeSpinner != nil && !activeSpinner.done {
 		activeSpinner.renderUnsafe()
@@ -276,73 +134,7 @@ func safeLog(format string, a ...interface{}) {
 }
 
 // runAnimatedCountdown runs a synchronized countdown with a smooth braille spinner.
-// When a 24/7 monitoring dashboard or launch card is active, it renders cleanly INSIDE the
-// card rows so cooldowns, engine initializations, and live RAM telemetry never clash or tear.
 func runAnimatedCountdown(label string, totalSeconds int, doneTag string, doneMsg string) {
-	if totalSeconds <= 0 {
-		return
-	}
-
-	dashboardMu.Lock()
-	monitoring := isMonitoringActive
-	dashboardMu.Unlock()
-
-	currentLaunchCard.Lock()
-	launchActive := currentLaunchCard.Active
-	launchClone := currentLaunchCard.ActiveClone
-	launchTotal := currentLaunchCard.TotalClones
-	launchPhase := currentLaunchCard.Phase
-	currentLaunchCard.Unlock()
-
-	cleanLabel := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(label), "..."))
-	actionCol := Cyan
-	lowerLabel := strings.ToLower(cleanLabel)
-	if strings.Contains(lowerLabel, "cool") || strings.Contains(lowerLabel, "stabiliz") {
-		actionCol = Amber
-	}
-
-	// 1. In-Dashboard 24/7 Sentinel Watchdog Mode
-	if monitoring {
-		for rem := totalSeconds; rem > 0; rem-- {
-			frame := spinnerFrames[(totalSeconds-rem)%len(spinnerFrames)]
-			dashboardMu.Lock()
-			currentDashboard.ActionStep = fmt.Sprintf("%s %s [%2ds]", frame, cleanLabel, rem)
-			currentDashboard.ActionColor = actionCol
-			dashboardMu.Unlock()
-
-			drawSummaryCard()
-			time.Sleep(1 * time.Second)
-		}
-
-		dashboardMu.Lock()
-		currentDashboard.ActionStep = ""
-		dashboardMu.Unlock()
-		drawSummaryCard()
-
-		if doneTag != "" && doneMsg != "" {
-			writeLog(doneTag, doneMsg)
-		}
-		return
-	}
-
-	// 2. In-Launch-Card Pre-Flight Mode
-	if launchActive {
-		for rem := totalSeconds; rem > 0; rem-- {
-			frame := spinnerFrames[(totalSeconds-rem)%len(spinnerFrames)]
-			detailText := fmt.Sprintf("%s %s [%2ds]", frame, cleanLabel, rem)
-			drawLaunchStatusCard(launchClone, launchTotal, launchPhase, detailText)
-			time.Sleep(1 * time.Second)
-		}
-		if doneMsg != "" {
-			drawLaunchStatusCard(launchClone, launchTotal, launchPhase, doneMsg)
-		}
-		if doneTag != "" && doneMsg != "" {
-			writeLog(doneTag, doneMsg)
-		}
-		return
-	}
-
-	// 3. Fallback Raw Console Mode (Initial Menus / Key Check)
 	s := &spinnerState{
 		label:     label,
 		remaining: totalSeconds,
@@ -356,8 +148,9 @@ func runAnimatedCountdown(label string, totalSeconds int, doneTag string, doneMs
 
 	frameTicker := time.NewTicker(80 * time.Millisecond)
 	defer frameTicker.Stop()
-	secondTicker := time.NewTicker(1 * time.Second)
-	defer secondTicker.Stop()
+
+	secTicker := time.NewTicker(1 * time.Second)
+	defer secTicker.Stop()
 
 	for s.remaining > 0 {
 		select {
@@ -368,8 +161,7 @@ func runAnimatedCountdown(label string, totalSeconds int, doneTag string, doneMs
 				s.renderUnsafe()
 			}
 			consoleMu.Unlock()
-
-		case <-secondTicker.C:
+		case <-secTicker.C:
 			consoleMu.Lock()
 			if activeSpinner == s && !s.done {
 				s.remaining--
@@ -387,16 +179,15 @@ func runAnimatedCountdown(label string, totalSeconds int, doneTag string, doneMs
 		activeSpinner = nil
 	}
 	fmt.Print("\r\033[K")
-	currTime := time.Now().Format("15:04:05")
-	if doneTag != "" && doneMsg != "" {
-		fmt.Printf("[%s] %s[%s]%s   %s\n", currTime, Green, doneTag, NC, doneMsg)
-		writeLog(doneTag, doneMsg)
+	if doneTag != "" {
+		fmt.Printf("  %s[%s]%s %s\n", Green, doneTag, NC, doneMsg)
 	}
 	consoleMu.Unlock()
 }
 
 // runAnimatedTask displays a spinner while an asynchronous task executes.
 func runAnimatedTask(label string, task func() error) error {
+	stopChan := make(chan struct{})
 	s := &spinnerState{
 		label:     label,
 		remaining: -1,
@@ -407,42 +198,44 @@ func runAnimatedTask(label string, task func() error) error {
 	s.renderUnsafe()
 	consoleMu.Unlock()
 
-	ticker := time.NewTicker(80 * time.Millisecond)
-	defer ticker.Stop()
-
-	doneChan := make(chan error, 1)
 	go func() {
-		doneChan <- task()
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-ticker.C:
+				consoleMu.Lock()
+				if activeSpinner == s && !s.done {
+					s.frameIdx++
+					s.renderUnsafe()
+				}
+				consoleMu.Unlock()
+			}
+		}
 	}()
 
-	for {
-		select {
-		case <-ticker.C:
-			consoleMu.Lock()
-			if activeSpinner == s && !s.done {
-				s.frameIdx++
-				s.renderUnsafe()
-			}
-			consoleMu.Unlock()
+	err := task()
 
-		case err := <-doneChan:
-			consoleMu.Lock()
-			s.done = true
-			if activeSpinner == s {
-				activeSpinner = nil
-			}
-			fmt.Print("\r\033[K")
-			consoleMu.Unlock()
-			return err
-		}
+	consoleMu.Lock()
+	close(stopChan)
+	s.done = true
+	if activeSpinner == s {
+		activeSpinner = nil
 	}
+	fmt.Print("\r\033[K")
+	consoleMu.Unlock()
+
+	return err
 }
 
-// ============================================================================
-// HELPER UTILITIES
-// ============================================================================
-
 func getCloneDisplayName(pkg string) string {
+	for i, p := range activePackages {
+		if p == pkg {
+			return fmt.Sprintf("Clone %d", i+1)
+		}
+	}
 	for i, p := range allPackages {
 		if p == pkg {
 			return fmt.Sprintf("Clone %d", i+1)
@@ -451,15 +244,15 @@ func getCloneDisplayName(pkg string) string {
 	if strings.Contains(pkg, "Clone") {
 		return pkg
 	}
-	return "Clone 1"
+	return "Clone"
 }
 
 func cleanSentinelLogLine(line string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	cleaned := ansiRegex.ReplaceAllString(line, "")
-	cleaned = strings.ReplaceAll(cleaned, "@everyone", "@\u200beveryone")
-	cleaned = strings.ReplaceAll(cleaned, "@here", "@\u200bhere")
-	return strings.TrimSpace(cleaned)
+	cleaned := line
+	for i, p := range allPackages {
+		cleaned = strings.ReplaceAll(cleaned, p, fmt.Sprintf("Clone %d", i+1))
+	}
+	return cleaned
 }
 
 func plural(n int) string {
@@ -470,632 +263,74 @@ func plural(n int) string {
 }
 
 // ============================================================================
-// RESOURCE METRICS & MONITORING SUBSYSTEM
+// SYSTEM RAM & PACKAGE INSTALLATION DETECTION
 // ============================================================================
 
-type SystemResourceStats struct {
-	TotalRAMMB      int
-	UsedRAMMB       int
-	AvailableRAMMB  int
-	RAMUsagePercent float64
-	TotalRAMGB      float64
-	UsedRAMGB       float64
-	AvailableRAMGB  float64
-	CPUUsagePercent float64
-	CPUCores        int
+type SystemMemory struct {
+	TotalMB     int
+	AvailableMB int
+	TotalGB     float64
+	AvailableGB float64
 }
 
-// getSystemResources collects kernel-level RAM from /proc/meminfo and CPU from /proc/stat.
-func getSystemResources() SystemResourceStats {
-	stats := SystemResourceStats{
-		CPUCores: runtime.NumCPU(),
-	}
-
-	// 1. Read /proc/meminfo
+func getSystemMemory() SystemMemory {
 	data, err := os.ReadFile("/proc/meminfo")
-	if err == nil {
-		var totalKB, availKB, freeKB, buffersKB, cachedKB int
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				key := strings.TrimSuffix(fields[0], ":")
-				val, _ := strconv.Atoi(fields[1])
-				switch key {
-				case "MemTotal":
-					totalKB = val
-				case "MemAvailable":
-					availKB = val
-				case "MemFree":
-					freeKB = val
-				case "Buffers":
-					buffersKB = val
-				case "Cached":
-					cachedKB = val
-				}
-			}
-		}
-
-		if availKB == 0 {
-			availKB = freeKB + buffersKB + cachedKB
-		}
-		if availKB > totalKB {
-			availKB = totalKB
-		}
-
-		totalMB := totalKB / 1024
-		availMB := availKB / 1024
-		usedMB := totalMB - availMB
-		if usedMB < 0 {
-			usedMB = 0
-		}
-
-		stats.TotalRAMMB = totalMB
-		stats.AvailableRAMMB = availMB
-		stats.UsedRAMMB = usedMB
-		stats.TotalRAMGB = float64(totalMB) / 1024.0
-		stats.AvailableRAMGB = float64(availMB) / 1024.0
-		stats.UsedRAMGB = float64(usedMB) / 1024.0
-
-		if totalMB > 0 {
-			stats.RAMUsagePercent = (float64(usedMB) / float64(totalMB)) * 100.0
-		}
+	if err != nil {
+		return SystemMemory{TotalMB: 0, AvailableMB: 0, TotalGB: 0, AvailableGB: 0}
 	}
 
-	// 2. Read CPU from /proc/stat (two samples over 90ms)
-	stats.CPUUsagePercent = getSystemCPUUsage()
-
-	return stats
-}
-
-func getSystemCPUUsage() float64 {
-	readStat := func() (idle, total uint64, err error) {
-		data, err := os.ReadFile("/proc/stat")
-		if err != nil {
-			return 0, 0, err
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "cpu ") {
-				fields := strings.Fields(line)[1:]
-				var sum uint64
-				for i, f := range fields {
-					val, _ := strconv.ParseUint(f, 10, 64)
-					sum += val
-					if i == 3 || i == 4 { // idle or iowait
-						idle += val
-					}
-				}
-				return idle, sum, nil
-			}
-		}
-		return 0, 0, fmt.Errorf("no cpu line")
-	}
-
-	idle1, total1, err1 := readStat()
-	if err1 != nil {
-		return 0.0
-	}
-	time.Sleep(90 * time.Millisecond)
-	idle2, total2, err2 := readStat()
-	if err2 != nil || total2 <= total1 {
-		return 0.0
-	}
-
-	deltaTotal := float64(total2 - total1)
-	deltaIdle := float64(idle2 - idle1)
-	usage := (1.0 - (deltaIdle / deltaTotal)) * 100.0
-	if usage < 0 {
-		usage = 0
-	} else if usage > 100 {
-		usage = 100
-	}
-	return usage
-}
-
-// Backward compatible helper for existing memory checks
-func getSystemMemory() SystemResourceStats {
-	return getSystemResources()
-}
-
-// RAM & CPU Balanced Clone Recommendation Formula:
-// Base OS footprint requires ~1.5 - 2.2 GB RAM and 1-2 CPU cores for UI/kernel stability.
-// Each Roblox Android clone consumes ~600 - 850 MB RSS and demands ~1.5 CPU cores of active workload.
-// Quad-core (<= 4 cores) mobile devices are strictly capped at 2 clones to prevent 100% CPU lockups.
-func getRecommendedClones(res SystemResourceStats) int {
-	if res.TotalRAMMB == 0 {
-		return 2 // default fallback
-	}
-
-	// 1. RAM Capacity Recommendation
-	ramRec := 2
-	total := res.TotalRAMMB
-	if total < 2800 { // Under 3GB (e.g. 2GB device)
-		ramRec = 1
-	} else if total < 4600 { // ~3GB - 4GB RAM
-		ramRec = 2
-	} else if total < 6800 { // ~5GB - 6GB RAM
-		ramRec = 3
-	} else if total < 9000 { // ~7GB - 8GB RAM
-		ramRec = 4
-	} else if total < 13000 { // ~10GB - 12GB RAM
-		ramRec = 5
-	} else {
-		ramRec = 6
-	}
-
-	// 2. CPU Core Capacity Recommendation
-	// 4 cores or fewer: 2 clones maximum. Android OS + Termux take 2 cores; 2 clones take 2 cores.
-	// 6 cores: 3 clones maximum.
-	// 8 cores: 4 clones maximum (5 if 12GB+ RAM).
-	cpuRec := 2
-	cores := res.CPUCores
-	if cores <= 2 {
-		cpuRec = 1
-	} else if cores <= 4 {
-		cpuRec = 2
-	} else if cores <= 6 {
-		cpuRec = 3
-	} else {
-		cpuRec = 4
-		if total >= 12000 && cores >= 8 {
-			cpuRec = 5
-		}
-	}
-
-	// If background CPU load is already heavy (> 45%), lower CPU allowance by 1
-	if res.CPUUsagePercent > 45.0 && cpuRec > 1 {
-		cpuRec--
-	}
-
-	// Balanced Recommendation: capped by the most constrained resource (RAM vs CPU)
-	rec := ramRec
-	if cpuRec < rec {
-		rec = cpuRec
-	}
-	if rec < 1 {
-		rec = 1
-	}
-	return rec
-}
-
-// ============================================================================
-// GAME MEMORY PROFILES & PER-CLONE TRACKING
-// ============================================================================
-
-type GameMemoryProfile struct {
-	Name            string
-	EstimatedRAMMB  int
-	ProfileCategory string
-}
-
-var knownGameProfiles = []GameMemoryProfile{
-	{Name: "Steal An Egg", EstimatedRAMMB: 1450, ProfileCategory: "Heavy (Dynamic Assets & Physics)"},
-	{Name: "Blox Fruits", EstimatedRAMMB: 1250, ProfileCategory: "Heavy (High Asset/Shaders)"},
-	{Name: "Pet Simulator 99", EstimatedRAMMB: 1150, ProfileCategory: "Heavy (High Entity Count)"},
-	{Name: "Blade Ball", EstimatedRAMMB: 850, ProfileCategory: "Moderate (Fast Arena Action)"},
-	{Name: "Fisch", EstimatedRAMMB: 980, ProfileCategory: "Moderate-Heavy (Water Shaders)"},
-	{Name: "Anime Defenders", EstimatedRAMMB: 1050, ProfileCategory: "Heavy (Tower Defense Units)"},
-	{Name: "Generic Roblox", EstimatedRAMMB: 950, ProfileCategory: "Standard Roblox Mobile Baseline"},
-}
-
-func getGameProfile(name string) GameMemoryProfile {
-	lowName := strings.ToLower(name)
-	for _, p := range knownGameProfiles {
-		if strings.Contains(lowName, strings.ToLower(p.Name)) {
-			return p
-		}
-	}
-	return knownGameProfiles[len(knownGameProfiles)-1]
-}
-
-type CloneResourceReport struct {
-	DisplayName string
-	Package     string
-	PID         int
-	RAMMB       int
-	IsEstimated bool
-	GameProfile string
-	Status      string
-}
-
-// CloneTelemetrySnapshot caches live measured process memory so crashes and freezes
-// retain their actual recorded memory rather than falling back to generic estimates.
-type CloneTelemetrySnapshot struct {
-	PID         int
-	RAMMB       int
-	IsEstimated bool
-	Timestamp   time.Time
-}
-
-type cloneTelemetryStore struct {
-	mu   sync.RWMutex
-	data map[string]CloneTelemetrySnapshot
-}
-
-var telemetryStore = &cloneTelemetryStore{
-	data: make(map[string]CloneTelemetrySnapshot),
-}
-
-func (s *cloneTelemetryStore) Set(pkg string, pid, ramMB int) {
-	if ramMB <= 0 {
-		return
-	}
-	s.mu.Lock()
-	s.data[pkg] = CloneTelemetrySnapshot{
-		PID:         pid,
-		RAMMB:       ramMB,
-		IsEstimated: false,
-		Timestamp:   time.Now(),
-	}
-	s.mu.Unlock()
-}
-
-func (s *cloneTelemetryStore) Get(pkg string) (CloneTelemetrySnapshot, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	val, ok := s.data[pkg]
-	return val, ok
-}
-
-// checkRoot tests if su is available to bypass Android 10 SELinux UID sandboxing.
-var (
-	isRooted      bool
-	rootCheckDone bool
-	rootMu        sync.Mutex
-)
-
-func checkRoot() bool {
-	rootMu.Lock()
-	defer rootMu.Unlock()
-	if rootCheckDone {
-		return isRooted
-	}
-	rootCheckDone = true
-	out, err := exec.Command("su", "-c", "id").CombinedOutput()
-	if err == nil && (strings.Contains(string(out), "uid=0") || strings.Contains(string(out), "root")) {
-		isRooted = true
-	}
-	return isRooted
-}
-
-func parseDumpsysMeminfo(output string) (int, int, bool) {
-	var pid int
-	var ramMB int
-
-	// Extract PID: ** MEMINFO in pid 18452 [com.roblox.client] **
-	rePID := regexp.MustCompile(`(?i)(?:\*\* MEMINFO in pid|pid)\s+([0-9]+)`)
-	if m := rePID.FindStringSubmatch(output); len(m) > 1 {
-		if p, err := strconv.Atoi(m[1]); err == nil && p > 0 {
-			pid = p
-		}
-	}
-
-	// Extract Memory: prefer TOTAL RSS, then TOTAL PSS, then TOTAL:, then table row
-	reRSS := regexp.MustCompile(`(?i)TOTAL\s+RSS:\s*([0-9]+)`)
-	if m := reRSS.FindStringSubmatch(output); len(m) > 1 {
-		if kb, err := strconv.Atoi(m[1]); err == nil && kb > 0 {
-			ramMB = kb / 1024
-			return pid, ramMB, true
-		}
-	}
-
-	rePSS := regexp.MustCompile(`(?i)TOTAL\s+PSS:\s*([0-9]+)`)
-	if m := rePSS.FindStringSubmatch(output); len(m) > 1 {
-		if kb, err := strconv.Atoi(m[1]); err == nil && kb > 0 {
-			ramMB = kb / 1024
-			return pid, ramMB, true
-		}
-	}
-
-	reColon := regexp.MustCompile(`(?i)TOTAL:\s*([0-9]+)`)
-	if m := reColon.FindStringSubmatch(output); len(m) > 1 {
-		if kb, err := strconv.Atoi(m[1]); err == nil && kb > 0 {
-			ramMB = kb / 1024
-			return pid, ramMB, true
-		}
-	}
-
-	lines := strings.Split(output, "\n")
-	for _, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(strings.ToUpper(trimmed), "TOTAL") {
-			fields := strings.Fields(trimmed)
-			for _, f := range fields[1:] {
-				fClean := strings.Trim(f, ":,")
-				if val, err := strconv.Atoi(fClean); err == nil && val > 1000 {
-					ramMB = val / 1024
-					return pid, ramMB, true
-				}
-			}
-		}
-	}
-
-	// If PID was found but ramMB wasn't, check /proc/<pid>/statm directly (with root if available)
-	if pid > 0 && ramMB == 0 {
-		statmData, sErr := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
-		if sErr != nil && checkRoot() {
-			if statmOut, rErr := exec.Command("su", "-c", fmt.Sprintf("cat /proc/%d/statm", pid)).Output(); rErr == nil {
-				statmData = statmOut
-				sErr = nil
-			}
-		}
-		if sErr == nil {
-			fields := strings.Fields(string(statmData))
-			if len(fields) >= 2 {
-				if pages, err := strconv.Atoi(fields[1]); err == nil && pages > 0 {
-					ramMB = (pages * 4) / 1024
-					return pid, ramMB, true
-				}
-			}
-		}
-	}
-
-	return pid, ramMB, ramMB > 0
-}
-
-func parsePsOutput(output, pkg string) (int, int, bool) {
-	lines := strings.Split(output, "\n")
-	pidCol := -1
-	rssCol := -1
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	var totalKB, availKB, freeKB int
+	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-
-		if pidCol == -1 && (strings.Contains(line, "PID") || strings.Contains(line, "pid")) {
-			for i, f := range fields {
-				switch strings.ToUpper(f) {
-				case "PID":
-					pidCol = i
-				case "RSS":
-					rssCol = i
-				}
-			}
-			continue
-		}
-
-		// Match against full package or last segment (e.g. clienb or com.roblox.clienb)
-		pkgShort := pkg
-		if idx := strings.LastIndex(pkg, "."); idx != -1 {
-			pkgShort = pkg[idx+1:]
-		}
-
-		if strings.Contains(line, pkg) || strings.Contains(line, pkgShort) {
-			if pidCol >= 0 && pidCol < len(fields) {
-				if pid, err := strconv.Atoi(fields[pidCol]); err == nil && pid > 0 {
-					var rssMB int
-					if rssCol >= 0 && rssCol < len(fields) {
-						if kb, kErr := strconv.Atoi(fields[rssCol]); kErr == nil && kb > 0 {
-							rssMB = kb / 1024
-						}
-					}
-					return pid, rssMB, true
-				}
-			}
-
-			// Fallback: search fields for integer PID and RSS
-			var foundPid int
-			var foundRss int
-			for _, f := range fields {
-				if val, err := strconv.Atoi(f); err == nil && val > 0 {
-					if foundPid == 0 && val < 65535 {
-						foundPid = val
-					} else if val > 10000 && foundRss == 0 { // likely RSS in KB (> 10MB)
-						foundRss = val / 1024
-					}
-				}
-			}
-			if foundPid > 0 {
-				return foundPid, foundRss, true
+		if len(fields) >= 2 {
+			key := strings.TrimSuffix(fields[0], ":")
+			val, _ := strconv.Atoi(fields[1])
+			switch key {
+			case "MemTotal":
+				totalKB = val
+			case "MemAvailable":
+				availKB = val
+			case "MemFree":
+				freeKB = val
 			}
 		}
 	}
-	return 0, 0, false
+
+	if availKB == 0 {
+		availKB = freeKB
+	}
+
+	totalMB := totalKB / 1024
+	availMB := availKB / 1024
+
+	return SystemMemory{
+		TotalMB:     totalMB,
+		AvailableMB: availMB,
+		TotalGB:     float64(totalMB) / 1024.0,
+		AvailableGB: float64(availMB) / 1024.0,
+	}
 }
 
-func getPIDsForPackage(pkg string) []string {
-	var results []string
-	seen := make(map[string]bool)
-
-	addPID := func(p string) {
-		p = strings.TrimSpace(p)
-		if p != "" && !seen[p] {
-			if _, err := strconv.Atoi(p); err == nil {
-				seen[p] = true
-				results = append(results, p)
-			}
-		}
+func getRecommendedClones(mem SystemMemory) int {
+	if mem.TotalMB == 0 {
+		return 2 // fallback default
 	}
 
-	commands := [][]string{
-		{"pidof", pkg},
-		{"/system/bin/pidof", pkg},
-		{"/system/bin/toybox", "pidof", pkg},
-		{"pgrep", "-f", pkg},
-		{"/system/bin/pgrep", "-f", pkg},
+	total := mem.TotalMB
+	if total < 2800 { // Under 3GB RAM (e.g. 2GB device)
+		return 1
+	} else if total < 4600 { // ~3GB - 4GB RAM
+		return 2
+	} else if total < 6800 { // ~5GB - 6GB RAM
+		return 3
+	} else if total < 9000 { // ~7GB - 8GB RAM
+		return 4
+	} else if total < 13000 { // ~10GB - 12GB RAM
+		return 5
 	}
-	if checkRoot() {
-		commands = append(commands, [][]string{
-			{"su", "-c", "pidof " + pkg},
-			{"su", "-c", "pgrep -f " + pkg},
-			{"su", "-c", "/system/bin/pidof " + pkg},
-		}...)
-	}
-
-	for _, cmdArgs := range commands {
-		out, err := exec.Command(cmdArgs[0], cmdArgs[1:]...).Output()
-		if err == nil {
-			for _, f := range strings.Fields(string(out)) {
-				addPID(f)
-			}
-			if len(results) > 0 {
-				return results
-			}
-		}
-	}
-
-	return results
+	// 12GB+ RAM
+	return 6
 }
-
-// getCloneMemoryUsage queries live actual process memory through an Android 10 capable multi-channel pipeline:
-// 1. Android OS dumpsys meminfo (bypasses procfs sandboxing)
-// 2. Direct procfs /proc/<pid>/statm & root bypass
-// 3. System ps / toybox ps inspection
-// 4. Thread-safe Telemetry Cache (preserves actual pre-crash metrics on terminated instances)
-// 5. Game-specific baseline fallback
-func getCloneMemoryUsage(pkg, game string) CloneResourceReport {
-	profile := getGameProfile(game)
-	report := CloneResourceReport{
-		Package:     pkg,
-		DisplayName: getCloneDisplayName(pkg),
-		IsEstimated: true,
-		RAMMB:       profile.EstimatedRAMMB,
-		GameProfile: profile.Name,
-		Status:      "RUNNING",
-	}
-
-	recoveringMu.Lock()
-	if recoveringClones[pkg] {
-		report.Status = "RECOVERING"
-	}
-	recoveringMu.Unlock()
-
-	// Channel 1: dumpsys meminfo (Android OS official package memory query)
-	dumpsysCmds := [][]string{
-		{"dumpsys", "meminfo", pkg},
-		{"/system/bin/dumpsys", "meminfo", pkg},
-	}
-	if checkRoot() {
-		dumpsysCmds = append(dumpsysCmds, []string{"su", "-c", "dumpsys meminfo " + pkg})
-	}
-
-	for _, cmdArgs := range dumpsysCmds {
-		out, err := exec.Command(cmdArgs[0], cmdArgs[1:]...).Output()
-		if err == nil && len(out) > 0 {
-			outStr := string(out)
-			if !strings.Contains(outStr, "No process found") {
-				pid, ramMB, ok := parseDumpsysMeminfo(outStr)
-				if ok && ramMB > 0 {
-					report.PID = pid
-					report.RAMMB = ramMB
-					report.IsEstimated = false
-					report.Status = "RUNNING"
-					telemetryStore.Set(pkg, pid, ramMB)
-					return report
-				}
-			}
-		}
-	}
-
-	// Channel 2: PID resolution + /proc/<pid>/statm
-	pids := getPIDsForPackage(pkg)
-	for _, pidStr := range pids {
-		if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-			report.PID = pid
-
-			statmData, sErr := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
-			if sErr != nil && checkRoot() {
-				statmOut, rErr := exec.Command("su", "-c", fmt.Sprintf("cat /proc/%d/statm", pid)).Output()
-				if rErr == nil {
-					statmData = statmOut
-					sErr = nil
-				}
-			}
-
-			if sErr == nil {
-				fields := strings.Fields(string(statmData))
-				if len(fields) >= 2 {
-					if rssPages, pErr := strconv.Atoi(fields[1]); pErr == nil && rssPages > 0 {
-						report.RAMMB = (rssPages * 4) / 1024
-						report.IsEstimated = false
-						report.Status = "RUNNING"
-						telemetryStore.Set(pkg, pid, report.RAMMB)
-						return report
-					}
-				}
-			}
-
-			// Sub-channel: dumpsys meminfo directly by PID
-			pidDumpsysCmds := [][]string{
-				{"dumpsys", "meminfo", strconv.Itoa(pid)},
-				{"/system/bin/dumpsys", "meminfo", strconv.Itoa(pid)},
-			}
-			if checkRoot() {
-				pidDumpsysCmds = append(pidDumpsysCmds, []string{"su", "-c", fmt.Sprintf("dumpsys meminfo %d", pid)})
-			}
-			for _, cmdArgs := range pidDumpsysCmds {
-				if dOut, dErr := exec.Command(cmdArgs[0], cmdArgs[1:]...).Output(); dErr == nil && len(dOut) > 0 {
-					_, dRam, dOk := parseDumpsysMeminfo(string(dOut))
-					if dOk && dRam > 0 {
-						report.RAMMB = dRam
-						report.IsEstimated = false
-						report.Status = "RUNNING"
-						telemetryStore.Set(pkg, pid, dRam)
-						return report
-					}
-				}
-			}
-		}
-	}
-
-	// Channel 3: ps inspection
-	psCmds := [][]string{
-		{"ps", "-A"},
-		{"/system/bin/ps", "-A"},
-		{"/system/bin/toybox", "ps", "-A", "-o", "PID,RSS,NAME"},
-	}
-	if checkRoot() {
-		psCmds = append(psCmds, [][]string{
-			{"su", "-c", "ps -A"},
-			{"su", "-c", "/system/bin/toybox ps -A -o PID,RSS,NAME"},
-			{"su", "-c", "ps -ef"},
-		}...)
-	}
-
-	for _, cmdArgs := range psCmds {
-		out, err := exec.Command(cmdArgs[0], cmdArgs[1:]...).Output()
-		if err == nil && len(out) > 0 {
-			if pid, ramMB, ok := parsePsOutput(string(out), pkg); ok && pid > 0 {
-				report.PID = pid
-				if ramMB > 0 {
-					report.RAMMB = ramMB
-					report.IsEstimated = false
-				}
-				report.Status = "RUNNING"
-				telemetryStore.Set(pkg, pid, report.RAMMB)
-				return report
-			}
-		}
-	}
-
-	// Channel 4: Process terminated / crashed / recovering -> use cached actual pre-crash telemetry
-	if cached, ok := telemetryStore.Get(pkg); ok && cached.RAMMB > 0 {
-		report.PID = cached.PID
-		report.RAMMB = cached.RAMMB
-		report.IsEstimated = false
-		report.Status = "STOPPED"
-		return report
-	}
-
-	// Channel 5: Fallback baseline estimation
-	report.Status = "STOPPED"
-	return report
-}
-
-// getSortedCloneStatuses returns clone reports sorted logically by Clone index (Clone 1 to N).
-func getSortedCloneStatuses() []CloneResourceReport {
-	var reports []CloneResourceReport
-	for _, pkg := range activePackages {
-		reports = append(reports, getCloneMemoryUsage(pkg, gameName))
-	}
-	return reports
-}
-
-// ============================================================================
-// PACKAGE DETECTION
-// ============================================================================
 
 func isPackageInstalled(pkg string) bool {
 	// 1. Try pm path
@@ -1178,16 +413,12 @@ func checkInstalledClones(count int) ([]string, bool) {
 }
 
 // ============================================================================
-// INPUT & CONFIG HELPERS
+// INPUT & LOGGING HELPERS
 // ============================================================================
 
 func initInputReader() {
 	go func() {
-		var inputSource io.Reader = os.Stdin
-		if tty, err := os.Open("/dev/tty"); err == nil {
-			inputSource = tty
-		}
-		scanner := bufio.NewScanner(inputSource)
+		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			inputChan <- scanner.Text()
 		}
@@ -1217,10 +448,6 @@ func drainInput() {
 	}
 }
 
-func promptInstruction() {
-	fmt.Printf("%s› Enter one letter or number, then press Enter to continue.%s\n", Dim, NC)
-}
-
 // Auth Response Structs
 type AuthRequest struct {
 	Key  string `json:"key"`
@@ -1233,110 +460,25 @@ type AuthResponse struct {
 	Message         string `json:"message"`
 	Tier            string `json:"tier"`
 	BoundHWID       string `json:"bound_hwid"`
-	IsUniversal     bool   `json:"is_universal"`
 	DefaultPlaceID  string `json:"default_place_id"`
 	DefaultGameName string `json:"default_game_name"`
 }
 
-// ============================================================================
-// WEBHOOK & NOTIFICATION CONFIGURATION
-// ============================================================================
-
-type BannersConfig struct {
-	CrashBanner    string `json:"crash_banner"`
-	FreezeBanner   string `json:"freeze_banner"`
-	RecoveryBanner string `json:"recovery_banner"`
-	AskAIBanner    string `json:"ask_ai_banner"`
-	ResourceBanner string `json:"resource_banner"`
+// Discord Webhook Payload
+type DiscordWebhookPayload struct {
+	Embeds []DiscordEmbed `json:"embeds"`
 }
 
-func getDefaultBanners() BannersConfig {
-	return BannersConfig{
-		CrashBanner:    "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/crash_banner.png",
-		FreezeBanner:   "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/freeze_banner.png",
-		RecoveryBanner: "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/recovery_banner.png",
-		AskAIBanner:    "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/ask_ai_banner.png",
-		ResourceBanner: "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/resource_banner.png",
-	}
-}
-
-func loadBannersConfig() BannersConfig {
-	cfg := getDefaultBanners()
-	cfgPath := filepath.Join(getHomeDir(), ".nefhub_banners.json")
-	if data, err := os.ReadFile(cfgPath); err == nil {
-		_ = json.Unmarshal(data, &cfg)
-	} else {
-		saveBannersConfig(cfg)
-	}
-	return cfg
-}
-
-func saveBannersConfig(cfg BannersConfig) {
-	cfgPath := filepath.Join(getHomeDir(), ".nefhub_banners.json")
-	if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
-		_ = os.WriteFile(cfgPath, data, 0644)
-	}
-}
-
-func loadDiscordMention() string {
-	mentionPath := filepath.Join(getHomeDir(), ".nefhub_mention")
-	if data, err := os.ReadFile(mentionPath); err == nil {
-		return strings.TrimSpace(string(data))
-	}
-	return ""
-}
-
-func saveDiscordMention(mention string) {
-	mentionPath := filepath.Join(getHomeDir(), ".nefhub_mention")
-	if mention == "" {
-		_ = os.Remove(mentionPath)
-		return
-	}
-	_ = os.WriteFile(mentionPath, []byte(mention), 0600)
-}
-
-// Discord Webhook Payload with Rich Embeds, Fields, and Banners
-type DiscordEmbedField struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Inline bool   `json:"inline,omitempty"`
-}
-
-type DiscordEmbedMedia struct {
-	URL string `json:"url"`
+type DiscordEmbed struct {
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Color       int           `json:"color"`
+	Footer      DiscordFooter `json:"footer"`
 }
 
 type DiscordFooter struct {
 	Text string `json:"text"`
 }
-
-type DiscordEmbed struct {
-	Title       string              `json:"title"`
-	Description string              `json:"description,omitempty"`
-	Color       int                 `json:"color"`
-	Fields      []DiscordEmbedField `json:"fields,omitempty"`
-	Image       *DiscordEmbedMedia  `json:"image,omitempty"`
-	Thumbnail   *DiscordEmbedMedia  `json:"thumbnail,omitempty"`
-	Footer      DiscordFooter       `json:"footer"`
-	Timestamp   string              `json:"timestamp,omitempty"`
-}
-
-type DiscordWebhookPayload struct {
-	Content string         `json:"content,omitempty"`
-	Embeds  []DiscordEmbed `json:"embeds"`
-}
-
-type WebhookEventType int
-
-const (
-	EventGeneral WebhookEventType = iota
-	EventCrash
-	EventFreeze
-	EventRecovery
-	EventAskAI
-	EventResourceAudit
-	EventNetwork
-)
 
 func getHomeDir() string {
 	home, err := os.UserHomeDir()
@@ -1362,51 +504,24 @@ func writeLog(tag, msg string) {
 	}
 }
 
-// sendRichWebhook delivers styled embeds with banner images, resource statistics, and user mentions.
-func sendRichWebhook(eventType WebhookEventType, title, message string, color int, fields []DiscordEmbedField) {
+func sendWebhook(title, message string, color int) {
 	if discordWebhook == "" {
 		return
 	}
 
-	banners := loadBannersConfig()
-	bannerURL := ""
-	switch eventType {
-	case EventCrash:
-		bannerURL = banners.CrashBanner
-	case EventFreeze:
-		bannerURL = banners.FreezeBanner
-	case EventRecovery:
-		bannerURL = banners.RecoveryBanner
-	case EventAskAI:
-		bannerURL = banners.AskAIBanner
-	case EventResourceAudit:
-		bannerURL = banners.ResourceBanner
-	}
-
 	cleanedMsg := cleanSentinelLogLine(message)
 
-	embed := DiscordEmbed{
-		Title:       title,
-		Description: cleanedMsg,
-		Color:       color,
-		Fields:      fields,
-		Footer: DiscordFooter{
-			Text: "Nefarious Hub Sentinel • Resource Guard",
-		},
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	if bannerURL != "" {
-		embed.Image = &DiscordEmbedMedia{URL: bannerURL}
-	}
-
 	payload := DiscordWebhookPayload{
-		Embeds: []DiscordEmbed{embed},
-	}
-
-	// Mention user only on critical alerts (Crash, Freeze, Recovery, Ask AI)
-	if discordMention != "" && (eventType == EventCrash || eventType == EventFreeze || eventType == EventRecovery || eventType == EventAskAI) {
-		payload.Content = discordMention
+		Embeds: []DiscordEmbed{
+			{
+				Title:       title,
+				Description: cleanedMsg,
+				Color:       color,
+				Footer: DiscordFooter{
+					Text: "Nefarious Hub Sentinel",
+				},
+			},
+		},
 	}
 
 	data, err := json.Marshal(payload)
@@ -1415,7 +530,7 @@ func sendRichWebhook(eventType WebhookEventType, title, message string, color in
 	}
 
 	go func() {
-		client := &http.Client{Timeout: 6 * time.Second}
+		client := &http.Client{Timeout: 5 * time.Second}
 		req, err := http.NewRequest("POST", discordWebhook, bytes.NewBuffer(data))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -1426,218 +541,6 @@ func sendRichWebhook(eventType WebhookEventType, title, message string, color in
 		}
 	}()
 }
-
-// sendWebhook is a backward-compatible wrapper for general events.
-func sendWebhook(title, message string, color int) {
-	sendRichWebhook(EventGeneral, title, message, color, nil)
-}
-
-func sendCrashWebhook(displayName, pkg, game string, res SystemResourceStats, mem CloneResourceReport, timestamp string) {
-	memLabel := fmt.Sprintf("%d MB", mem.RAMMB)
-	if mem.IsEstimated {
-		memLabel = fmt.Sprintf("~%d MB (Estimated - %s)", mem.RAMMB, mem.GameProfile)
-	} else if mem.PID > 0 {
-		memLabel = fmt.Sprintf("%d MB (Actual RSS before crash - PID %d)", mem.RAMMB, mem.PID)
-	} else {
-		memLabel = fmt.Sprintf("%d MB (Actual Measured RSS)", mem.RAMMB)
-	}
-
-	fields := []DiscordEmbedField{
-		{Name: "🎮 Experience", Value: fmt.Sprintf("`%s`", game), Inline: true},
-		{Name: "📱 Target Instance", Value: fmt.Sprintf("`%s` (%s)", displayName, pkg), Inline: true},
-		{Name: "⚠️ Status", Value: "`CRASHED` (Process Terminated)", Inline: true},
-		{Name: "💾 System RAM", Value: fmt.Sprintf("%.1f / %.1f GB Used (%.1f GB Avail - %.0f%%)", res.UsedRAMGB, res.TotalRAMGB, res.AvailableRAMGB, res.RAMUsagePercent), Inline: false},
-		{Name: "⚡ CPU Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
-		{Name: "📦 Instance Memory", Value: memLabel, Inline: true},
-		{Name: "🕒 Event Time", Value: timestamp, Inline: true},
-	}
-
-	sendRichWebhook(EventCrash, "🚨 Crash Detected", fmt.Sprintf("**%s** terminated unexpectedly. Initiating automated recovery sequence...", displayName), 15158332, fields)
-}
-
-func sendFreezeWebhook(displayName, pkg, game string, res SystemResourceStats, mem CloneResourceReport, timestamp string) {
-	memLabel := fmt.Sprintf("%d MB", mem.RAMMB)
-	if mem.IsEstimated {
-		memLabel = fmt.Sprintf("~%d MB (Estimated - %s)", mem.RAMMB, mem.GameProfile)
-	} else if mem.PID > 0 {
-		memLabel = fmt.Sprintf("%d MB (Actual RSS before freeze - PID %d)", mem.RAMMB, mem.PID)
-	} else {
-		memLabel = fmt.Sprintf("%d MB (Actual Measured RSS)", mem.RAMMB)
-	}
-
-	fields := []DiscordEmbedField{
-		{Name: "🎮 Experience", Value: fmt.Sprintf("`%s`", game), Inline: true},
-		{Name: "📱 Target Instance", Value: fmt.Sprintf("`%s` (%s)", displayName, pkg), Inline: true},
-		{Name: "❄️ Status", Value: "`FROZEN` (ANR Unresponsive)", Inline: true},
-		{Name: "💾 System RAM", Value: fmt.Sprintf("%.1f / %.1f GB Used (%.1f GB Avail - %.0f%%)", res.UsedRAMGB, res.TotalRAMGB, res.AvailableRAMGB, res.RAMUsagePercent), Inline: false},
-		{Name: "⚡ CPU Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
-		{Name: "📦 Instance Memory", Value: memLabel, Inline: true},
-		{Name: "🕒 Event Time", Value: timestamp, Inline: true},
-	}
-
-	sendRichWebhook(EventFreeze, "❄️ Freeze Detected (ANR)", fmt.Sprintf("**%s** stopped responding. Force-rebooting clone client engine...", displayName), 15105570, fields)
-}
-
-func sendRecoveryWebhook(displayName, pkg, game string, res SystemResourceStats, mem CloneResourceReport) {
-	memLabel := fmt.Sprintf("%d MB", mem.RAMMB)
-	if mem.IsEstimated {
-		memLabel = fmt.Sprintf("~%d MB (Estimated - %s)", mem.RAMMB, mem.GameProfile)
-	} else if mem.PID > 0 {
-		memLabel = fmt.Sprintf("%d MB (Actual RSS - PID %d)", mem.RAMMB, mem.PID)
-	} else {
-		memLabel = fmt.Sprintf("%d MB (Actual Measured RSS)", mem.RAMMB)
-	}
-
-	fields := []DiscordEmbedField{
-		{Name: "🎮 Experience", Value: fmt.Sprintf("`%s`", game), Inline: true},
-		{Name: "📱 Target Instance", Value: fmt.Sprintf("`%s`", displayName), Inline: true},
-		{Name: "✅ Status", Value: "`ONLINE & SYNCHRONIZED`", Inline: true},
-		{Name: "💾 System RAM", Value: fmt.Sprintf("%.1f / %.1f GB Used (%.1f GB Avail)", res.UsedRAMGB, res.TotalRAMGB, res.AvailableRAMGB), Inline: false},
-		{Name: "⚡ CPU Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
-		{Name: "📦 Instance Memory", Value: memLabel, Inline: true},
-		{Name: "🕒 Restored At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
-	}
-
-	sendRichWebhook(EventRecovery, "✅ Instance Recovered", fmt.Sprintf("**%s** is back online and resynchronized with **%s**.", displayName, game), 3066993, fields)
-}
-
-func sendAskAIWebhook(player, cloneParam, query string) {
-	if discordWebhook == "" {
-		return
-	}
-	res := getSystemResources()
-	cloneLabel := "Clone (Active)"
-	if cloneParam != "" {
-		cloneLabel = fmt.Sprintf("Clone %s", cloneParam)
-	}
-
-	fields := []DiscordEmbedField{
-		{Name: "📱 Instance", Value: fmt.Sprintf("`%s`", cloneLabel), Inline: true},
-		{Name: "👤 Player", Value: fmt.Sprintf("`%s`", player), Inline: true},
-		{Name: "💾 System RAM", Value: fmt.Sprintf("%.1f / %.1f GB (%.0f%%)", res.UsedRAMGB, res.TotalRAMGB, res.RAMUsagePercent), Inline: true},
-		{Name: "❓ Query / Prompt", Value: fmt.Sprintf("```%s```", truncate(query, 1000)), Inline: false},
-	}
-
-	sendRichWebhook(EventAskAI, "🤖 Ask AI Assistant", fmt.Sprintf("New AI assistance request dispatched from `%s`.", player), 3447003, fields)
-}
-
-// startResourceMonitor runs a periodic resource health audit every 5 minutes,
-// and sends an initial audit report shortly after startup once instances stabilize.
-func startResourceMonitor() {
-	runAudit := func() {
-		if discordWebhook == "" || !isInternetConnected() {
-			return
-		}
-
-		res := getSystemResources()
-		if res.TotalRAMMB == 0 {
-			return
-		}
-
-		var cloneLines []string
-		for _, pkg := range activePackages {
-			rep := getCloneMemoryUsage(pkg, gameName)
-			tag := fmt.Sprintf("`%s`", rep.DisplayName)
-			if rep.IsEstimated {
-				cloneLines = append(cloneLines, fmt.Sprintf("• %s: ~%d MB *(Estimated - %s)*", tag, rep.RAMMB, rep.GameProfile))
-			} else if rep.PID > 0 {
-				cloneLines = append(cloneLines, fmt.Sprintf("• %s: %d MB *(Actual RSS - PID %d)*", tag, rep.RAMMB, rep.PID))
-			} else {
-				cloneLines = append(cloneLines, fmt.Sprintf("• %s: %d MB *(Actual RSS)*", tag, rep.RAMMB))
-			}
-		}
-
-		cloneSummary := strings.Join(cloneLines, "\n")
-		if cloneSummary == "" {
-			cloneSummary = "*No active clones monitored*"
-		}
-
-		fields := []DiscordEmbedField{
-			{Name: "💾 System RAM", Value: fmt.Sprintf("%.1f / %.1f GB Used (%.1f GB Avail - %.0f%%)", res.UsedRAMGB, res.TotalRAMGB, res.AvailableRAMGB, res.RAMUsagePercent), Inline: false},
-			{Name: "⚡ CPU Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
-			{Name: "🛡️ Sentinel Status", Value: fmt.Sprintf("%d Clones Active", len(activePackages)), Inline: true},
-			{Name: "📱 Monitored Instances", Value: cloneSummary, Inline: false},
-			{Name: "🎮 Target Experience", Value: fmt.Sprintf("`%s`", truncate(gameName, 28)), Inline: true},
-			{Name: "🕒 Report Time", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
-		}
-
-		sendRichWebhook(EventResourceAudit, "📊 Periodic Resource Health Monitor (5m)",
-			"Automated 5-minute system and instance resource telemetry.",
-			5793266, fields)
-	}
-
-	// Send initial audit report 25 seconds after sentinel begins so the user immediately sees live metrics
-	go func() {
-		time.Sleep(25 * time.Second)
-		runAudit()
-	}()
-
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		runAudit()
-	}
-}
-
-// startTelemetrySampler continually refreshes clone memory telemetry every 30 seconds.
-// Reduced from 5s to 30s to eliminate shell spawn overhead (dumpsys + ps per clone).
-func startTelemetrySampler() {
-	ticker := time.NewTicker(30 * time.Second)
-	lastSampledRAM := make(map[string]int)
-	go func() {
-		for range ticker.C {
-			if !isMonitoringActive {
-				continue
-			}
-			updated := false
-			for _, pkg := range activePackages {
-				rep := getCloneMemoryUsage(pkg, gameName)
-
-				// Telemetry Health Store: updates measured RAM and PID without false-positive procfs crash triggers
-				cloneHealthMu.Lock()
-				h, exists := cloneHealthStore[pkg]
-				if !exists {
-					h = &cloneHealthInfo{launchedAt: time.Now()}
-					cloneHealthStore[pkg] = h
-				}
-
-				if rep.PID > 0 && rep.RAMMB > 0 {
-					h.lastRAM = rep.RAMMB
-					h.lastPID = rep.PID
-					h.stagnantCycles = 0
-				}
-				cloneHealthMu.Unlock()
-
-				if !rep.IsEstimated && rep.RAMMB > 0 {
-					lastRAM := lastSampledRAM[pkg]
-					// Only redraw when measured RAM delta is significant (>= 15 MB) to eliminate visual flicker
-					delta := rep.RAMMB - lastRAM
-					if delta < 0 {
-						delta = -delta
-					}
-					if delta >= 15 || lastRAM == 0 {
-						lastSampledRAM[pkg] = rep.RAMMB
-						updated = true
-					}
-				}
-			}
-			if updated {
-				dashboardMu.Lock()
-				active := isMonitoringActive
-				hasCountdown := currentDashboard.ActionStep != ""
-				dashboardMu.Unlock()
-				if active && !hasCountdown {
-					drawSummaryCard()
-				}
-			}
-		}
-	}()
-}
-
-// ============================================================================
-// HARDWARE ID & DEVICE INTEGRITY
-// ============================================================================
 
 func getDeviceHWID() string {
 	readCmd := func(name string, args ...string) string {
@@ -1671,7 +574,7 @@ func getDeviceHWID() string {
 	_ = os.WriteFile("/sdcard/nefarious_hwid.txt", []byte(finalHWID), 0644)
 	_ = os.WriteFile("/sdcard/Delta/nefarious_hwid.txt", []byte(finalHWID), 0644)
 
-	// Clean up legacy files
+	// Clean up and remove any legacy nefarious_client.lua from Delta autoexec paths
 	cleanTargets := []string{
 		"/sdcard/Delta/autoexec/nefarious_client.lua",
 		"/sdcard/nefarious_client.lua",
@@ -1687,1190 +590,91 @@ func getDeviceHWID() string {
 	return finalHWID
 }
 
-// ============================================================================
-// UI RENDERING & CARDS (DYNAMIC CENTERED BOX SYSTEM WITH SMOOTH CURVES)
-// ============================================================================
-
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-func stripANSI(s string) string {
-	return ansiRegex.ReplaceAllString(s, "")
-}
-
-func visibleWidth(s string) int {
-	return utf8.RuneCountInString(stripANSI(s))
-}
-
-func truncateVisible(s string, maxCols int) string {
-	if maxCols <= 0 {
-		return ""
-	}
-	clean := stripANSI(s)
-	runes := []rune(clean)
-	if len(runes) <= maxCols {
-		return clean
-	}
-	if maxCols <= 3 {
-		return string(runes[:maxCols])
-	}
-	return string(runes[:maxCols-3]) + "..."
-}
-
-func wrapText(s string, width int) []string {
-	if width <= 0 {
-		return []string{s}
-	}
-	clean := stripANSI(s)
-	words := strings.Fields(clean)
-	if len(words) == 0 {
-		return []string{clean}
-	}
-
-	var res []string
-	var curr strings.Builder
-	currLen := 0
-
-	for _, w := range words {
-		wLen := utf8.RuneCountInString(w)
-		if currLen == 0 {
-			if wLen > width {
-				runes := []rune(w)
-				for len(runes) > 0 {
-					take := width
-					if take > len(runes) {
-						take = len(runes)
-					}
-					res = append(res, string(runes[:take]))
-					runes = runes[take:]
-				}
-				continue
-			}
-			curr.WriteString(w)
-			currLen = wLen
-		} else if currLen+1+wLen <= width {
-			curr.WriteString(" ")
-			curr.WriteString(w)
-			currLen += 1 + wLen
-		} else {
-			res = append(res, curr.String())
-			curr.Reset()
-			if wLen > width {
-				runes := []rune(w)
-				for len(runes) > 0 {
-					take := width
-					if take > len(runes) {
-						take = len(runes)
-					}
-					res = append(res, string(runes[:take]))
-					runes = runes[take:]
-				}
-				currLen = 0
-			} else {
-				curr.WriteString(w)
-				currLen = wLen
-			}
-		}
-	}
-	if currLen > 0 {
-		res = append(res, curr.String())
-	}
-	return res
-}
-
-func detectTerminalSize() (int, int) {
-	// 1. Check environment variables COLUMNS and LINES
-	if cols, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && cols > 10 {
-		if lines, err2 := strconv.Atoi(os.Getenv("LINES")); err2 == nil && lines > 5 {
-			return cols, lines
-		}
-	}
-
-	// 2. Try stty size with /dev/tty redirection (standard for Android Termux)
-	sttyCmds := []string{
-		"stty size < /dev/tty 2>/dev/null",
-		"stty size 2>/dev/null",
-		"/system/bin/stty size < /dev/tty 2>/dev/null",
-	}
-	for _, cmdStr := range sttyCmds {
-		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			parts := strings.Fields(string(out))
-			if len(parts) >= 2 {
-				h, errH := strconv.Atoi(parts[0])
-				w, errW := strconv.Atoi(parts[1])
-				if errH == nil && errW == nil && w > 10 && h > 5 {
-					return w, h
-				}
-			}
-		}
-	}
-
-	// 3. Try tput cols / tput lines with /dev/tty
-	tputCmds := []string{
-		"tput cols < /dev/tty 2>/dev/null",
-		"tput cols 2>/dev/null",
-	}
-	for _, cmdStr := range tputCmds {
-		if outW, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			if w, err := strconv.Atoi(strings.TrimSpace(string(outW))); err == nil && w > 10 {
-				h := 24
-				if outH, err := exec.Command("sh", "-c", "tput lines < /dev/tty 2>/dev/null").Output(); err == nil {
-					if hVal, err := strconv.Atoi(strings.TrimSpace(string(outH))); err == nil && hVal > 5 {
-						h = hVal
-					}
-				}
-				return w, h
-			}
-		}
-	}
-
-	// 4. Android Developer Options "Smallest Width" (dp) Detection via wm size & density
-	// Uses root / shell to read exact hardware display geometry and compute character capacity
-	var screenPxW int
-	wmSizeCmds := []string{
-		"wm size 2>/dev/null",
-		"/system/bin/wm size 2>/dev/null",
-	}
-	if checkRoot() {
-		wmSizeCmds = append(wmSizeCmds, "su -c 'wm size' 2>/dev/null")
-	}
-	for _, cmdStr := range wmSizeCmds {
-		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			reSize := regexp.MustCompile(`([0-9]+)x([0-9]+)`)
-			if m := reSize.FindStringSubmatch(string(out)); len(m) >= 3 {
-				w, _ := strconv.Atoi(m[1])
-				h, _ := strconv.Atoi(m[2])
-				if w > 0 && h > 0 {
-					if w < h {
-						screenPxW = w
-					} else {
-						screenPxW = h
-					}
-					break
-				}
-			}
-		}
-	}
-
-	var density int
-	wmDenCmds := []string{
-		"wm density 2>/dev/null",
-		"/system/bin/wm density 2>/dev/null",
-	}
-	if checkRoot() {
-		wmDenCmds = append(wmDenCmds, "su -c 'wm density' 2>/dev/null")
-	}
-	for _, cmdStr := range wmDenCmds {
-		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			reDen := regexp.MustCompile(`density:\s*([0-9]+)`)
-			if m := reDen.FindStringSubmatch(string(out)); len(m) > 1 {
-				if d, err := strconv.Atoi(m[1]); err == nil && d > 0 {
-					density = d
-					break
-				}
-			}
-		}
-	}
-
-	// Smallest width in DP = (px * 160) / density
-	if screenPxW > 0 && density > 0 {
-		swDp := (screenPxW * 160) / density
-		// Termux standard font consumes ~8.2 dp per character column
-		calcCols := int(float64(swDp) / 8.2)
-		if calcCols >= 36 && calcCols <= 80 {
-			return calcCols, 24
-		}
-	}
-
-	// 5. Native Termux Portrait Baseline (46 columns, 24 rows)
-	return 46, 24
-}
-
-func calculateBoxDimensions(boxHeight int) (boxWidth, leftPadding, topPadding int) {
-	termW, termH := detectTerminalSize()
-
-	preferredBoxWidth := DASHBOARD_MAX_WIDTH
-	minimumBoxWidth := DASHBOARD_MIN_WIDTH
-	safetyMargin := TERMINAL_SAFETY_MARGIN
-
-	avail := termW - safetyMargin
-	if avail < 10 {
-		avail = termW
-	}
-
-	boxWidth = preferredBoxWidth
-	if boxWidth > avail {
-		boxWidth = avail
-	}
-	if boxWidth < minimumBoxWidth {
-		boxWidth = minimumBoxWidth
-	}
-	// Absolute ceiling: never exceed physical terminal width
-	if boxWidth > termW {
-		boxWidth = termW
-	}
-
-	leftPadding = 0
-	if CENTER_DASHBOARD && termW > boxWidth {
-		leftPadding = (termW - boxWidth) / 2
-	}
-
-	// The box must always satisfy: left_padding + box_width <= terminal_width
-	if leftPadding+boxWidth > termW {
-		leftPadding = termW - boxWidth
-		if leftPadding < 0 {
-			leftPadding = 0
-		}
-	}
-
-	// Vertical positioning: strictly disabled on mobile/small terminals (< 38 rows)
-	topPadding = 0
-	if CENTER_DASHBOARD_VERTICALLY && termH >= 38 && termH > boxHeight+8 {
-		topPadding = (termH - boxHeight) / 4
-		if topPadding > 2 {
-			topPadding = 2
-		}
-	}
-
-	return boxWidth, leftPadding, topPadding
-}
-
-type RowType int
-
-const (
-	RowHeader RowType = iota
-	RowSubtitle
-	RowKeyValue
-	RowSeparator
-	RowCentered
-	RowStatus
-	RowBlank
-)
-
-type BoxRow struct {
-	Type        RowType
-	Label       string
-	LabelColor  string
-	Value       string
-	ValueColor  string
-	RightText   string
-	RightColor  string
-	CustomText  string
-	CustomColor string
-	PrefixIcon  string
-	PrefixColor string
-}
-
-type DashboardEventInfo struct {
-	Status      string
-	StatusColor string
-	EventTag    string
-	EventDesc   string
-	EventRAM    string
-	EventTime   string
-	HasEvent    bool
-	ActionStep  string
-	ActionColor string
-	QueueInfo   string
-}
-
-var (
-	dashboardMu       sync.Mutex
-	currentDashboard  = DashboardEventInfo{
-		Status:      "Monitoring Active",
-		StatusColor: Green,
-	}
-	isMonitoringActive = false
-)
-
-func setDashboardStatus(status string, color string) {
-	dashboardMu.Lock()
-	if status != "" {
-		currentDashboard.Status = status
-	}
-	if color != "" {
-		currentDashboard.StatusColor = color
-	}
-	active := isMonitoringActive
-	dashboardMu.Unlock()
-
-	if active {
-		drawSummaryCard()
-	}
-}
-
-func clearDashboardEvent() {
-	dashboardMu.Lock()
-	currentDashboard.HasEvent = false
-	currentDashboard.EventTag = ""
-	currentDashboard.EventDesc = ""
-	currentDashboard.EventRAM = ""
-	currentDashboard.EventTime = ""
-	currentDashboard.ActionStep = ""
-	currentDashboard.QueueInfo = ""
-	active := isMonitoringActive
-	dashboardMu.Unlock()
-
-	if active {
-		drawSummaryCard()
-	}
-}
-
-func setDashboardEvent(status, statusColor, eventTag, eventDesc, eventRAM, eventTime string) {
-	dashboardMu.Lock()
-	if status != "" {
-		currentDashboard.Status = status
-	}
-	if statusColor != "" {
-		currentDashboard.StatusColor = statusColor
-	}
-	if eventTag != "" {
-		currentDashboard.EventTag = eventTag
-		currentDashboard.EventDesc = eventDesc
-		currentDashboard.EventRAM = eventRAM
-		currentDashboard.EventTime = eventTime
-		currentDashboard.HasEvent = true
-	}
-	active := isMonitoringActive
-	dashboardMu.Unlock()
-
-	if active {
-		drawSummaryCard()
-	}
-}
-
-func initResizeWatcher() {
-	winchChan := make(chan os.Signal, 1)
-	signal.Notify(winchChan, syscall.Signal(28)) // SIGWINCH on Linux / Android Termux
-	go func() {
-		for range winchChan {
-			onTerminalResize()
-		}
-	}()
-}
-
-func onTerminalResize() {
-	dashboardMu.Lock()
-	active := isMonitoringActive
-	dashboardMu.Unlock()
-	if active {
-		drawSummaryCard()
-	}
-}
-
-func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight int, borderColor string) string {
-	boxWidth, leftPad, topPad := calculateBoxDimensions(len(rows) + 2)
-	padStr := strings.Repeat(" ", leftPad)
-
-	innerSpan := boxWidth - 2
-	if innerSpan < 1 {
-		innerSpan = 1
-	}
-
-	innerPad := 2
-	if innerSpan <= 36 {
-		innerPad = 1
-	}
-	availInner := innerSpan - (innerPad * 2)
-	if availInner < 1 {
-		availInner = 1
-	}
-
-	var sb strings.Builder
-
-	// Top padding if vertically centered
-	for i := 0; i < topPad; i++ {
-		sb.WriteString("\n")
-	}
-
-	// Top Border with smooth curved corners: ╭ ╮
-	sb.WriteString(padStr)
-	sb.WriteString(borderColor)
-	sb.WriteString("╭")
-	sb.WriteString(strings.Repeat("─", innerSpan))
-	sb.WriteString("╮")
-	sb.WriteString(NC)
-	sb.WriteString("\n")
-
-	for _, r := range rows {
-		switch r.Type {
-		case RowSeparator:
-			sb.WriteString(padStr)
-			sb.WriteString(borderColor)
-			sb.WriteString("├")
-			sb.WriteString(strings.Repeat("─", innerSpan))
-			sb.WriteString("┤")
-			sb.WriteString(NC)
-			sb.WriteString("\n")
-
-		case RowHeader:
-			leftVis := r.PrefixIcon + r.Label
-			leftLen := visibleWidth(leftVis)
-			rightVis := r.RightText
-			rightLen := visibleWidth(rightVis)
-
-			if leftLen+rightLen+1 > availInner {
-				availForLeft := availInner - rightLen - 1
-				if availForLeft < 6 {
-					availForLeft = 6
-				}
-				leftVis = truncateVisible(leftVis, availForLeft)
-				leftLen = visibleWidth(leftVis)
-			}
-
-			gap := availInner - leftLen - rightLen
-			if gap < 0 {
-				gap = 0
-			}
-
-			sb.WriteString(padStr)
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString(strings.Repeat(" ", innerPad))
-
-			if r.PrefixIcon != "" {
-				sb.WriteString(r.PrefixColor)
-				sb.WriteString(r.PrefixIcon)
-				sb.WriteString(NC)
-			}
-			sb.WriteString(r.LabelColor)
-			sb.WriteString(r.Label)
-			sb.WriteString(NC)
-
-			sb.WriteString(strings.Repeat(" ", gap))
-
-			if r.RightText != "" {
-				sb.WriteString(r.RightColor)
-				sb.WriteString(r.RightText)
-				sb.WriteString(NC)
-			}
-
-			sb.WriteString(strings.Repeat(" ", innerPad))
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString("\n")
-
-		case RowSubtitle, RowCentered:
-			text := r.CustomText
-			var linesToPrint []string
-			if visibleWidth(text) > availInner && WRAP_LONG_VALUES && availInner >= 10 {
-				linesToPrint = wrapText(text, availInner)
-			} else if visibleWidth(text) > availInner {
-				linesToPrint = []string{truncateVisible(text, availInner)}
-			} else {
-				linesToPrint = []string{text}
-			}
-
-			for _, lText := range linesToPrint {
-				txtLen := visibleWidth(lText)
-				var leftSpaces, rightSpaces int
-				if r.Type == RowCentered {
-					leftSpaces = (availInner - txtLen) / 2
-					rightSpaces = availInner - txtLen - leftSpaces
-				} else {
-					leftSpaces = 0
-					rightSpaces = availInner - txtLen
-				}
-				if leftSpaces < 0 {
-					leftSpaces = 0
-				}
-				if rightSpaces < 0 {
-					rightSpaces = 0
-				}
-
-				sb.WriteString(padStr)
-				sb.WriteString(borderColor)
-				sb.WriteString("│")
-				sb.WriteString(NC)
-				sb.WriteString(strings.Repeat(" ", innerPad+leftSpaces))
-				sb.WriteString(r.CustomColor)
-				sb.WriteString(lText)
-				sb.WriteString(NC)
-				sb.WriteString(strings.Repeat(" ", rightSpaces+innerPad))
-				sb.WriteString(borderColor)
-				sb.WriteString("│")
-				sb.WriteString(NC)
-				sb.WriteString("\n")
-			}
-
-		case RowKeyValue, RowStatus:
-			lbl := r.Label
-			val := r.Value
-			lblLen := visibleWidth(lbl)
-			availVal := availInner - lblLen
-			if availVal < 4 {
-				availVal = 4
-			}
-
-			if visibleWidth(val) > availVal {
-				if WRAP_LONG_VALUES && availVal >= 10 {
-					chunks := wrapText(val, availVal)
-					for i, ch := range chunks {
-						chLen := visibleWidth(ch)
-						chGap := availVal - chLen
-						if chGap < 0 {
-							chGap = 0
-						}
-
-						sb.WriteString(padStr)
-						sb.WriteString(borderColor)
-						sb.WriteString("│")
-						sb.WriteString(NC)
-						sb.WriteString(strings.Repeat(" ", innerPad))
-
-						if i == 0 {
-							sb.WriteString(r.LabelColor)
-							sb.WriteString(lbl)
-							sb.WriteString(NC)
-						} else {
-							sb.WriteString(strings.Repeat(" ", lblLen))
-						}
-
-						sb.WriteString(r.ValueColor)
-						sb.WriteString(ch)
-						sb.WriteString(NC)
-						sb.WriteString(strings.Repeat(" ", chGap))
-						sb.WriteString(strings.Repeat(" ", innerPad))
-						sb.WriteString(borderColor)
-						sb.WriteString("│")
-						sb.WriteString(NC)
-						sb.WriteString("\n")
-					}
-					continue
-				} else if SHORTEN_LONG_VALUES {
-					val = truncateVisible(val, availVal)
-				}
-			}
-
-			valLen := visibleWidth(val)
-			gap := availInner - lblLen - valLen
-			if gap < 0 {
-				gap = 0
-			}
-
-			sb.WriteString(padStr)
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString(strings.Repeat(" ", innerPad))
-			sb.WriteString(r.LabelColor)
-			sb.WriteString(lbl)
-			sb.WriteString(NC)
-			sb.WriteString(r.ValueColor)
-			sb.WriteString(val)
-			sb.WriteString(NC)
-			sb.WriteString(strings.Repeat(" ", gap))
-			sb.WriteString(strings.Repeat(" ", innerPad))
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString("\n")
-
-		case RowBlank:
-			sb.WriteString(padStr)
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString(strings.Repeat(" ", innerSpan))
-			sb.WriteString(borderColor)
-			sb.WriteString("│")
-			sb.WriteString(NC)
-			sb.WriteString("\n")
-		}
-	}
-
-	// Bottom Border with smooth curved corners: ╰ ╯
-	sb.WriteString(padStr)
-	sb.WriteString(borderColor)
-	sb.WriteString("╰")
-	sb.WriteString(strings.Repeat("─", innerSpan))
-	sb.WriteString("╯")
-	sb.WriteString(NC)
-	sb.WriteString("\n")
-
-	return sb.String()
-}
-
 func drawBanner() {
-	termW, termH := detectTerminalSize()
-
-	rows := []BoxRow{
-		{
-			Type:        RowHeader,
-			PrefixIcon:  "◆ ",
-			PrefixColor: Cyan,
-			Label:       "NEFARIUS HUB",
-			LabelColor:  Bold + Cyan,
-			RightText:   "v" + ScriptVersion,
-			RightColor:  White,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "Sentinel & Multi-Instance Guard",
-			CustomColor: Dim,
-		},
-	}
-
+	fmt.Print("\033[H\033[2J")
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────┐%s\n", Gray, NC)
+	fmt.Printf("%s│%s  %s%s%-24s%s %s%13s%s  %s│%s\n", Gray, NC, Bold, White, "NEFARIOUS HUB", NC, Cyan, "v"+ScriptVersion, NC, Gray, NC)
+	fmt.Printf("%s│%s  %s%-38s%s  %s│%s\n", Gray, NC, Dim, "Sentinel & Multi-Instance Recovery", NC, Gray, NC)
 	if licenseKey != "" {
-		hwidVal := myHWID
-		if isUniversalKey {
-			hwidVal = "UNIVERSAL (Multi-Device)"
-		}
-		rows = append(rows,
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:       RowKeyValue,
-				Label:      "License : ",
-				LabelColor: Gray,
-				Value:      licenseKey,
-				ValueColor: White,
-			},
-			BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Tier    : ",
-				LabelColor: Gray,
-				Value:      licenseDuration,
-				ValueColor: Green,
-			},
-			BoxRow{
-				Type:       RowKeyValue,
-				Label:      "HWID    : ",
-				LabelColor: Gray,
-				Value:      hwidVal,
-				ValueColor: Cyan,
-			},
-		)
+		fmt.Printf("%s├──────────────────────────────────────────┤%s\n", Gray, NC)
+		fmt.Printf("%s│%s  %s%-8s%s %s%-29s%s  %s│%s\n", Gray, NC, Gray, "Key  :", NC, White, truncate(licenseKey, 29), NC, Gray, NC)
+		fmt.Printf("%s│%s  %s%-8s%s %s%-29s%s  %s│%s\n", Gray, NC, Gray, "Tier :", NC, Green, truncate(licenseDuration, 29), NC, Gray, NC)
+		fmt.Printf("%s│%s  %s%-8s%s %s%-29s%s  %s│%s\n", Gray, NC, Gray, "HWID :", NC, Cyan, truncate(myHWID, 29), NC, Gray, NC)
 	}
-
-	rows = append(rows,
-		BoxRow{Type: RowSeparator},
-		BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Credits : ",
-			LabelColor: Gray,
-			Value:      "@NightWitch, @Eysdi, @Jep",
-			ValueColor: White,
-		},
-	)
-
-	box := renderCenteredBox("BANNER", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
-}
-
-func getMenuLeftPad() string {
-	_, leftPad, _ := calculateBoxDimensions(10)
-	return strings.Repeat(" ", leftPad)
-}
-
-func drawStepCard(stepTitle, stepSubtitle string, rows []BoxRow) {
-	termW, termH := detectTerminalSize()
-
-	cardRows := []BoxRow{
-		{
-			Type:        RowHeader,
-			PrefixIcon:  "◆ ",
-			PrefixColor: Cyan,
-			Label:       stepTitle,
-			LabelColor:  Bold + White,
-			RightText:   "v" + ScriptVersion,
-			RightColor:  Dim,
-		},
-	}
-	if stepSubtitle != "" {
-		cardRows = append(cardRows, BoxRow{
-			Type:        RowSubtitle,
-			CustomText:  stepSubtitle,
-			CustomColor: Cyan,
-		})
-	}
-	if len(rows) > 0 {
-		cardRows = append(cardRows, BoxRow{Type: RowSeparator})
-		cardRows = append(cardRows, rows...)
-	}
-
-	box := renderCenteredBox(stepTitle, cardRows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
+	fmt.Printf("%s├──────────────────────────────────────────┤%s\n", Gray, NC)
+	fmt.Printf("%s│%s  %s%-8s%s %s%-29s%s  %s│%s\n", Gray, NC, Gray, "Devs :", NC, White, "@NightWitch & @Jep", NC, Gray, NC)
+	fmt.Printf("%s└──────────────────────────────────────────┘%s\n", Gray, NC)
+	fmt.Println()
 }
 
 func drawAlertCard(cardType, title, line1, line2, line3 string) {
 	borderColor := Gray
-	titleColor := White
 	switch cardType {
 	case "ERROR":
 		borderColor = Red
-		titleColor = Red
 	case "WARN":
 		borderColor = Amber
-		titleColor = Amber
 	case "SUCCESS":
 		borderColor = Green
-		titleColor = Green
 	}
 
-	termW, termH := detectTerminalSize()
-	rows := []BoxRow{
-		{
-			Type:        RowCentered,
-			CustomText:  title,
-			CustomColor: Bold + titleColor,
-		},
+	fmt.Println()
+	fmt.Printf("%s┌──────────────────────────────────────────┐%s\n", borderColor, NC)
+	fmt.Printf("%s│%s  %s%-38s%s  %s│%s\n", borderColor, NC, Bold, truncate(title, 38), NC, borderColor, NC)
+	fmt.Printf("%s├──────────────────────────────────────────┤%s\n", borderColor, NC)
+	if line1 != "" {
+		fmt.Printf("%s│%s  %-38s  %s│%s\n", borderColor, NC, truncate(line1, 38), borderColor, NC)
 	}
-	if line1 != "" || line2 != "" || line3 != "" {
-		rows = append(rows, BoxRow{Type: RowSeparator})
-		if line1 != "" {
-			rows = append(rows, BoxRow{Type: RowSubtitle, CustomText: line1, CustomColor: White})
-		}
-		if line2 != "" {
-			rows = append(rows, BoxRow{Type: RowSubtitle, CustomText: line2, CustomColor: White})
-		}
-		if line3 != "" {
-			rows = append(rows, BoxRow{Type: RowSubtitle, CustomText: line3, CustomColor: White})
-		}
+	if line2 != "" {
+		fmt.Printf("%s│%s  %-38s  %s│%s\n", borderColor, NC, truncate(line2, 38), borderColor, NC)
 	}
-	fmt.Print(renderCenteredBox("ALERT", rows, termW, termH, borderColor))
+	if line3 != "" {
+		fmt.Printf("%s│%s  %-38s  %s│%s\n", borderColor, NC, truncate(line3, 38), borderColor, NC)
+	}
+	fmt.Printf("%s└──────────────────────────────────────────┘%s\n", borderColor, NC)
+	fmt.Println()
 }
 
-// drawSummaryCard renders the Session Pre-Flight with live RAM, CPU, and game profile metrics.
 func drawSummaryCard() {
-	renderMu.Lock()
-	defer renderMu.Unlock()
-
-	res := getSystemResources()
-	profile := getGameProfile(gameName)
-	termW, termH := detectTerminalSize()
-
-	tierDisplay := licenseDuration
-	if tierDisplay == "" {
-		tierDisplay = "Free"
-	}
-
-	rows := []BoxRow{
-		{
-			Type:        RowHeader,
-			PrefixIcon:  "◆ ",
-			PrefixColor: Cyan,
-			Label:       "NEFARIUS HUB",
-			LabelColor:  Bold + Cyan,
-			RightText:   "[" + tierDisplay + "]",
-			RightColor:  Bold + Green,
-		},
-		{Type: RowSeparator},
-		{
-			Type:        RowCentered,
-			CustomText:  "SESSION PRE-FLIGHT",
-			CustomColor: Bold + White,
-		},
-		{Type: RowSeparator},
-		{
-			Type:       RowKeyValue,
-			Label:      "Experience: ",
-			LabelColor: Gray,
-			Value:      gameName,
-			ValueColor: White,
-		},
-	}
-
-	expType := "Public Server"
-	typeColor := White
+	fmt.Printf("%s┌──────────────────────────────────────────┐%s\n", Gray, NC)
+	fmt.Printf("%s│%s  %s%s%-38s%s  %s│%s\n", Gray, NC, Bold, White, "SESSION PRE-FLIGHT", NC, Gray, NC)
+	fmt.Printf("%s├──────────────────────────────────────────┤%s\n", Gray, NC)
+	fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Experience:", NC, White, truncate(gameName, 26), NC, Gray, NC)
 	if strings.Contains(gameURL, "share?") || strings.Contains(gameURL, "privateServer") || strings.Contains(gameName, "[VIP]") {
-		expType = "Private Server (VIP)"
-		typeColor = Green
-	}
-	rows = append(rows, BoxRow{
-		Type:       RowKeyValue,
-		Label:      "Type      : ",
-		LabelColor: Gray,
-		Value:      expType,
-		ValueColor: typeColor,
-	})
-
-	rows = append(rows, BoxRow{
-		Type:       RowKeyValue,
-		Label:      "Instances : ",
-		LabelColor: Gray,
-		Value:      fmt.Sprintf("%d Clone%s", cloneCount, plural(cloneCount)),
-		ValueColor: White,
-	})
-
-	rows = append(rows, BoxRow{
-		Type:       RowKeyValue,
-		Label:      "License   : ",
-		LabelColor: Gray,
-		Value:      licenseDuration,
-		ValueColor: Green,
-	})
-
-	sentinelVal := "ACTIVE (Auto-Rejoin)"
-	sentinelColor := Green
-	if !enableRejoin {
-		sentinelVal = "DISABLED (One-time)"
-		sentinelColor = Dark
-	}
-	rows = append(rows, BoxRow{
-		Type:       RowStatus,
-		Label:      "Sentinel  : ",
-		LabelColor: Gray,
-		Value:      sentinelVal,
-		ValueColor: sentinelColor,
-	})
-
-	discordVal := "CONNECTED"
-	discordColor := Green
-	if discordWebhook == "" {
-		discordVal = "DISABLED"
-		discordColor = Dark
-	}
-	rows = append(rows, BoxRow{
-		Type:       RowStatus,
-		Label:      "Discord   : ",
-		LabelColor: Gray,
-		Value:      discordVal,
-		ValueColor: discordColor,
-	})
-
-
-
-	rows = append(rows,
-		BoxRow{Type: RowSeparator},
-		BoxRow{
-			Type:        RowCentered,
-			CustomText:  "RESOURCE TELEMETRY",
-			CustomColor: Bold + White,
-		},
-		BoxRow{Type: RowSeparator},
-	)
-
-	if res.TotalRAMMB > 0 {
-		ramStr := fmt.Sprintf("%.1f/%.1f GB (%.0f%% Used)", res.UsedRAMGB, res.TotalRAMGB, res.RAMUsagePercent)
-		rows = append(rows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "System RAM: ",
-			LabelColor: Gray,
-			Value:      ramStr,
-			ValueColor: Cyan,
-		})
-		availStr := fmt.Sprintf("%.1f GB Free / Available", res.AvailableRAMGB)
-		rows = append(rows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Avail RAM : ",
-			LabelColor: Gray,
-			Value:      availStr,
-			ValueColor: Green,
-		})
-	}
-
-	cpuStr := fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores)
-	rows = append(rows, BoxRow{
-		Type:       RowKeyValue,
-		Label:      "CPU Load  : ",
-		LabelColor: Gray,
-		Value:      cpuStr,
-		ValueColor: White,
-	})
-
-	// Dynamic Per-Instance RAM Telemetry (Live Measured vs Pre-Launch Baseline)
-	type cloneMemEntry struct {
-		Label string
-		Value string
-	}
-	var actualEntries []cloneMemEntry
-
-	sortedReports := getSortedCloneStatuses()
-	for _, rep := range sortedReports {
-		if !rep.IsEstimated && rep.RAMMB > 0 {
-			var val string
-			if rep.Status == "RECOVERING" {
-				val = fmt.Sprintf("%d MB (RECOVERING)", rep.RAMMB)
-			} else if rep.PID > 0 {
-				val = fmt.Sprintf("%d MB (PID %d)", rep.RAMMB, rep.PID)
-			} else {
-				val = fmt.Sprintf("%d MB RSS", rep.RAMMB)
-			}
-			cloneTag := fmt.Sprintf("%s RAM: ", rep.DisplayName)
-			actualEntries = append(actualEntries, cloneMemEntry{Label: cloneTag, Value: val})
-		}
-	}
-
-	if len(actualEntries) > 0 {
-		for _, ent := range actualEntries {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      ent.Label,
-				LabelColor: Gray,
-				Value:      ent.Value,
-				ValueColor: Green,
-			})
-		}
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Type      :", NC, Green, "Private Server (VIP)", NC, Gray, NC)
 	} else {
-		cloneMemStr := fmt.Sprintf("~%d MB / clone (%s)", profile.EstimatedRAMMB, profile.Name)
-		rows = append(rows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Memory Est: ",
-			LabelColor: Gray,
-			Value:      cloneMemStr,
-			ValueColor: Amber,
-		})
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Type      :", NC, White, "Public Server", NC, Gray, NC)
 	}
-
-	dashboardMu.Lock()
-	stMsg := currentDashboard.Status
-	stCol := currentDashboard.StatusColor
-	actionStep := currentDashboard.ActionStep
-	actionCol := currentDashboard.ActionColor
-	queueInfo := currentDashboard.QueueInfo
-	hasEv := currentDashboard.HasEvent
-	evDesc := currentDashboard.EventDesc
-	evTag := currentDashboard.EventTag
-	evRAM := currentDashboard.EventRAM
-	evTime := currentDashboard.EventTime
-	dashboardMu.Unlock()
-
-	if stMsg != "" {
-		rows = append(rows,
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:       RowStatus,
-				Label:      "Live Status : ",
-				LabelColor: Gray,
-				Value:      "● " + stMsg,
-				ValueColor: stCol,
-			},
-		)
+	fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Instances :", NC, White, fmt.Sprintf("%d Clone%s", cloneCount, plural(cloneCount)), NC, Gray, NC)
+	if enableRejoin {
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Sentinel  :", NC, Green, "ACTIVE", NC, Gray, NC)
+	} else {
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Sentinel  :", NC, Dark, "DISABLED (One-time)", NC, Gray, NC)
 	}
-
-	if actionStep != "" {
-		if actionCol == "" {
-			actionCol = Cyan
-		}
-		rows = append(rows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Action Step : ",
-			LabelColor: Gray,
-			Value:      actionStep,
-			ValueColor: actionCol,
-		})
+	if discordWebhook != "" {
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Discord   :", NC, Green, "ENABLED", NC, Gray, NC)
+	} else {
+		fmt.Printf("%s│%s  %s%-11s%s %s%-26s%s  %s│%s\n", Gray, NC, Gray, "Discord   :", NC, Dark, "DISABLED", NC, Gray, NC)
 	}
-
-	if queueInfo != "" {
-		rows = append(rows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Crash Queue : ",
-			LabelColor: Gray,
-			Value:      queueInfo,
-			ValueColor: Amber,
-		})
-	}
-
-	if hasEv {
-		evColor := Red
-		if evTag == "RECOVERED" || evTag == "RESTORED" {
-			evColor = Green
-		} else if evTag == "ANR" || evTag == "FREEZE" {
-			evColor = Amber
-		}
-
-		if evDesc != "" {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Event Alert : ",
-				LabelColor: Gray,
-				Value:      evDesc,
-				ValueColor: evColor,
-			})
-		}
-		if evRAM != "" {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Event Info  : ",
-				LabelColor: Gray,
-				Value:      evRAM,
-				ValueColor: White,
-			})
-		}
-		if evTime != "" {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Event Time  : ",
-				LabelColor: Gray,
-				Value:      evTime,
-				ValueColor: Dim,
-			})
-		}
-	}
-
-	box := renderCenteredBox("SUMMARY", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
-}
-
-func drawLaunchStatusCard(activeClone, totalClones int, phase, detail string) {
-	currentLaunchCard.Lock()
-	currentLaunchCard.Active = true
-	currentLaunchCard.ActiveClone = activeClone
-	currentLaunchCard.TotalClones = totalClones
-	currentLaunchCard.Phase = phase
-	currentLaunchCard.Detail = detail
-	currentLaunchCard.Unlock()
-
-	renderMu.Lock()
-	defer renderMu.Unlock()
-
-	termW, termH := detectTerminalSize()
-	rows := []BoxRow{
-		{
-			Type:        RowHeader,
-			PrefixIcon:  "◆ ",
-			PrefixColor: Cyan,
-			Label:       "LAUNCHING INSTANCES",
-			LabelColor:  Bold + White,
-			RightText:   fmt.Sprintf("%d/%d", activeClone, totalClones),
-			RightColor:  Cyan,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "Automated Client Engine & Game Injection",
-			CustomColor: Dim,
-		},
-		BoxRow{Type: RowSeparator},
-		{
-			Type:       RowKeyValue,
-			Label:      "Target Game : ",
-			LabelColor: Gray,
-			Value:      truncate(gameName, 24),
-			ValueColor: White,
-		},
-		{
-			Type:       RowKeyValue,
-			Label:      "Current App : ",
-			LabelColor: Gray,
-			Value:      fmt.Sprintf("Clone %d of %d", activeClone, totalClones),
-			ValueColor: Cyan,
-		},
-		{
-			Type:       RowKeyValue,
-			Label:      "Action Step : ",
-			LabelColor: Gray,
-			Value:      phase,
-			ValueColor: Amber,
-		},
-	}
-	if detail != "" {
-		rows = append(rows,
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  detail,
-				CustomColor: Green,
-			},
-		)
-	}
-	box := renderCenteredBox("LAUNCH_STATUS", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
-}
-
-func drawSentinelActiveCard() {
-	currentLaunchCard.Lock()
-	currentLaunchCard.Active = false
-	currentLaunchCard.Unlock()
-
-	renderMu.Lock()
-	defer renderMu.Unlock()
-
-	termW, termH := detectTerminalSize()
-	rows := []BoxRow{
-		{
-			Type:        RowHeader,
-			PrefixIcon:  "◆ ",
-			PrefixColor: Green,
-			Label:       "SENTINEL IN-GAME GUARD",
-			LabelColor:  Bold + Green,
-			RightText:   "ACTIVE",
-			RightColor:  Bold + Green,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "24/7 Crash, ANR & Disconnect Watchdog",
-			CustomColor: Dim,
-		},
-		BoxRow{Type: RowSeparator},
-		{
-			Type:       RowKeyValue,
-			Label:      "Monitored   : ",
-			LabelColor: Gray,
-			Value:      fmt.Sprintf("%d Clone%s Online", cloneCount, plural(cloneCount)),
-			ValueColor: Cyan,
-		},
-		{
-			Type:       RowKeyValue,
-			Label:      "Experience  : ",
-			LabelColor: Gray,
-			Value:      truncate(gameName, 24),
-			ValueColor: White,
-		},
-		{
-			Type:       RowKeyValue,
-			Label:      "Guard State : ",
-			LabelColor: Gray,
-			Value:      "● Monitoring 24/7 (Auto-Rejoin)",
-			ValueColor: Green,
-		},
-		BoxRow{Type: RowSeparator},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "All instances successfully launched & synchronized!",
-			CustomColor: Green,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "Sentinel will automatically restart clones if they crash.",
-			CustomColor: Dim,
-		},
-	}
-	box := renderCenteredBox("SENTINEL_ACTIVE", rows, termW, termH, Green)
-	fmt.Print("\033[H\033[2J" + box)
+	fmt.Printf("%s└──────────────────────────────────────────┘%s\n", Gray, NC)
 }
 
 func truncate(s string, maxLen int) string {
-	return truncateVisible(s, maxLen)
-}
-
-// compareSemver compares two semantic versions (e.g. "1.4.2" vs "1.5.0").
-// Returns -1 if v1 < v2, 1 if v1 > v2, 0 if v1 == v2.
-func compareSemver(v1, v2 string) int {
-	clean := func(s string) []int {
-		s = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(s), "v"))
-		if idx := strings.IndexAny(s, " |\t\n-"); idx != -1 {
-			s = s[:idx]
+	if len(s) > maxLen {
+		if maxLen > 3 {
+			return s[:maxLen-3] + "..."
 		}
-		parts := strings.Split(s, ".")
-		var nums []int
-		for _, p := range parts {
-			n, _ := strconv.Atoi(strings.TrimSpace(p))
-			nums = append(nums, n)
-		}
-		for len(nums) < 3 {
-			nums = append(nums, 0)
-		}
-		return nums
+		return s[:maxLen]
 	}
-	p1 := clean(v1)
-	p2 := clean(v2)
-	for i := 0; i < len(p1) && i < len(p2); i++ {
-		if p1[i] < p2[i] {
-			return -1
-		}
-		if p1[i] > p2[i] {
-			return 1
-		}
-	}
-	return 0
+	return s
 }
 
 func checkUpdates() {
-	var rawBody string
+	var latest string
 	var reqErr error
 
-	_ = runAnimatedTask("Verifying version & release integrity...", func() error {
+	_ = runAnimatedTask("Checking for updates...", func() error {
 		client := &http.Client{Timeout: 5 * time.Second}
 		reqURL := fmt.Sprintf("%s?_t=%d", VersionURL, time.Now().Unix())
 		resp, err := client.Get(reqURL)
@@ -2883,311 +687,146 @@ func checkUpdates() {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		rawBody = strings.TrimSpace(string(body))
+		latest = strings.TrimSpace(string(body))
 		return nil
 	})
 
-	latestVersion := ScriptVersion
-	releaseDate := ""
-	if rawBody != "" {
-		lines := strings.Split(rawBody, "\n")
-		firstLine := strings.TrimSpace(lines[0])
-		if strings.Contains(firstLine, "|") {
-			parts := strings.Split(firstLine, "|")
-			latestVersion = strings.TrimSpace(parts[0])
-			if len(parts) > 1 {
-				releaseDate = strings.TrimSpace(parts[1])
-			}
-		} else {
-			latestVersion = firstLine
-			if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
-				releaseDate = strings.TrimSpace(lines[1])
-			}
-		}
-	}
-
-	cmp := compareSemver(ScriptVersion, latestVersion)
-	isOutdated := (cmp < 0)
-
-	// Check date if provided in version payload
-	isDateExpired := false
-	if releaseDate != "" {
-		if parsedDate, dErr := time.Parse("2006-01-02", releaseDate); dErr == nil {
-			if time.Now().After(parsedDate.Add(24*time.Hour)) && isOutdated {
-				isDateExpired = true
-			}
-		}
-	}
-
-	statusText := "VERIFIED (Latest Build)"
-	statusColor := Green
-	if isOutdated || isDateExpired {
-		statusText = "OUTDATED / BLOCKED"
-		statusColor = Red
-	} else if reqErr != nil {
-		statusText = "OFFLINE (Local v" + ScriptVersion + ")"
-		statusColor = Amber
-	}
-
-	verRows := []BoxRow{
-		{
-			Type:       RowKeyValue,
-			Label:      "Installed  : ",
-			LabelColor: Gray,
-			Value:      "v" + ScriptVersion,
-			ValueColor: White,
-		},
-		{
-			Type:       RowKeyValue,
-			Label:      "Latest Req : ",
-			LabelColor: Gray,
-			Value:      "v" + latestVersion,
-			ValueColor: White,
-		},
-	}
-	if releaseDate != "" {
-		verRows = append(verRows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Release Date: ",
-			LabelColor: Gray,
-			Value:      releaseDate,
-			ValueColor: Gray,
-		})
-	}
-	verRows = append(verRows,
-		BoxRow{Type: RowSeparator},
-		BoxRow{
-			Type:       RowStatus,
-			Label:      "Validation : ",
-			LabelColor: Gray,
-			Value:      statusText,
-			ValueColor: statusColor,
-		},
-	)
-
-	drawStepCard("VERSION VERIFICATION", "Integrity & Payload Compatibility Check", verRows)
-	time.Sleep(1500 * time.Millisecond)
-
-	if isOutdated || isDateExpired {
-		safeLog("\n  %s[WARN]%s A newer version v%s is available (you have v%s).",
-			Amber, NC, latestVersion, ScriptVersion)
-		drawAlertCard("UPDATE", "[!] NEW VERSION AVAILABLE",
-			fmt.Sprintf("You have v%s. Latest is v%s.", ScriptVersion, latestVersion),
-			"Run the latest script to get fixes and improvements.",
-			"github.com/relayced/Hexagon")
-		time.Sleep(2 * time.Second)
+	if latest != "" && latest != ScriptVersion {
+		safeLog("  %s[UPDATE REQUIRED]%s Newer version v%s available (installed: v%s)", Amber, NC, latest, ScriptVersion)
+		drawAlertCard("WARN", "[!] UPDATE REQUIRED",
+			"A newer version is available.",
+			fmt.Sprintf("Installed : v%s  |  Latest : v%s", ScriptVersion, latest),
+			"Please update from GitHub or Discord.")
+		os.Exit(1)
 	}
 
 	if reqErr != nil {
-		safeLog("  %s[INFO]%s Network check skipped (using cached v%s)", Gray, NC, ScriptVersion)
+		safeLog("  %s[INFO]%s Update check skipped (offline/cached v%s)", Gray, NC, ScriptVersion)
 	} else {
-		safeLog("  %s[OK]%s Version v%s verified and compatible.", Green, NC, ScriptVersion)
+		safeLog("  %s[OK]%s Version v%s up to date", Green, NC, ScriptVersion)
 	}
 }
 
-// ============================================================================
-// LICENSE CONFIGURATION
-// ============================================================================
-
 func verifyLicense() {
-	licenseKey = "Free"
-	licenseDuration = "Free"
-	isUniversalKey = false
+	licenseKey = "OPEN-SOURCE"
+	licenseDuration = "Lifetime"
 	serverPlaceID = "107778070777162"
 	serverGameName = "Steal An Egg"
+	safeLog("  %s[LICENSE]%s Open-source release - All features unlocked", Green, NC)
 }
-
-// ============================================================================
-// CONFIGURATION MENUS
-// ============================================================================
 
 func configureConcurrency() {
 	drainInput()
-	res := getSystemResources()
-	rec := getRecommendedClones(res)
+	mem := getSystemMemory()
+	rec := getRecommendedClones(mem)
 
 	for {
-		pad := getMenuLeftPad()
-		var rows []BoxRow
-		rows = append(rows,
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "Runs multiple Roblox accounts at once to farm.",
-				CustomColor: White,
-			},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "Each clone uses ~650-800MB RAM.",
-				CustomColor: Dim,
-			},
-			BoxRow{Type: RowSeparator},
-		)
+		drawBanner()
+		fmt.Printf("%s── %s%s1. Instance Concurrency%s %s─────────────────%s\n", Gray, White, Bold, NC, Gray, NC)
+		if mem.TotalMB > 0 {
+			fmt.Printf("%sDevice RAM  :%s %s%.1f GB Total%s (%s%.1f GB Available%s)\n", Gray, NC, White, mem.TotalGB, NC, Cyan, mem.AvailableGB, NC)
+			fmt.Printf("%sRecommended :%s %s%d Clone%s%s %s(optimized for your device)%s\n\n", Gray, NC, Green, rec, plural(rec), NC, Dim, NC)
+		} else {
+			fmt.Printf("%sRecommended :%s %s2 Clones%s\n\n", Gray, NC, Green, NC)
+		}
+
+		fmt.Printf("%sSelect number of Roblox clones to run:%s\n\n", Gray, NC)
 
 		for i := 1; i <= 6; i++ {
 			var note string
 			var color string = White
 			if i == rec {
-				note = "★ Recommended (CPU & RAM Balanced)"
+				note = fmt.Sprintf("%s(Recommended for your RAM)%s", Green, NC)
 				color = Green
-			} else if i == 1 {
-				note = "Solo - Lightest Load"
-				color = Dim
 			} else if i < rec {
-				note = "Safe & Lightweight"
-				color = Dim
-			} else if res.CPUCores <= 4 && i > 2 {
-				note = fmt.Sprintf("High CPU Overload (Capped by %d Cores)", res.CPUCores)
-				color = Amber
-				if i >= 4 {
-					color = Red
+				if i == 1 {
+					note = fmt.Sprintf("%s(Solo instance - Lightest memory)%s", Dim, NC)
+				} else {
+					note = fmt.Sprintf("%s(Safe & lightweight)%s", Dim, NC)
 				}
-			} else if i-rec == 1 {
-				note = "Moderate Hardware Pressure"
-				color = Amber
-			} else if i-rec == 2 {
-				note = "High Risk of Crash / OOM"
-				color = Amber
-			} else {
-				note = "Extreme CPU & RAM Pressure"
-				color = Red
+			} else { // i > rec
+				diff := i - rec
+				if diff == 1 {
+					note = fmt.Sprintf("%s(Above recommended - Moderate RAM pressure)%s", Amber, NC)
+				} else if diff == 2 {
+					note = fmt.Sprintf("%s(Above recommended - High risk of crash / OOM)%s", Amber, NC)
+				} else {
+					note = fmt.Sprintf("%s(Above recommended - Extreme RAM pressure)%s", Red, NC)
+				}
 			}
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      fmt.Sprintf("[%d] %d Clone%s  ", i, i, plural(i)),
-				LabelColor: color,
-				Value:      note,
-				ValueColor: color,
-			})
+
+			fmt.Printf("  %s[%d]%s %d Clone%s  %s\n", color, i, NC, i, plural(i), note)
 		}
+		fmt.Println()
 
-		rows = append(rows,
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  fmt.Sprintf("Tip: Press [ENTER] to use recommended (%d Clones)", rec),
-				CustomColor: Green,
-			},
-		)
-
-		sub := "Select number of Roblox clones to run"
-		if res.TotalRAMMB > 0 {
-			sub = fmt.Sprintf("RAM: %.1fGB | CPU: %d Cores (%.0f%%) | Rec: %d Clones", res.TotalRAMGB, res.CPUCores, res.CPUUsagePercent, rec)
-		}
-		drawStepCard("1. INSTANCE CONCURRENCY", sub, rows)
-
-		fmt.Printf("%s› Clones [1-6] (default: %d): %s", pad+White, rec, NC)
+		fmt.Printf("%s› Clones [1-6] (default: %d): %s", White, rec, NC)
 		input := strings.TrimSpace(readLine())
 		selected := rec
 		if input != "" {
 			c, err := strconv.Atoi(input)
 			if err != nil || c < 1 || c > 6 {
-				drawAlertCard("ERROR", "[!] INVALID ENTRY", "Please enter a number between 1 and 6.", "", "")
-				time.Sleep(1500 * time.Millisecond)
+				fmt.Printf("%s[!] Invalid entry. Enter a number between 1 and 6.%s\n", Red, NC)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 			selected = c
 		}
 
+		// If user selects above recommended, display note and confirmation
 		if selected > rec {
-			warnText := fmt.Sprintf("%d clones exceeds recommendation (%d).", selected, rec)
-			if res.CPUCores <= 4 && selected > 2 {
-				warnText = fmt.Sprintf("%d clones will heavily overload your %d-Core CPU!", selected, res.CPUCores)
-			}
-			warnRows := []BoxRow{
-				{Type: RowSubtitle, CustomText: warnText, CustomColor: Amber},
-				{Type: RowSubtitle, CustomText: "May cause high thermal throttling, ANR freezes & crashing.", CustomColor: Red},
-				{Type: RowSeparator},
-				{Type: RowSubtitle, CustomText: "Proceed anyway? [y/N] (default: N)", CustomColor: White},
-			}
-			drawStepCard("HARDWARE WARNING", "CPU & Memory Overload Warning", warnRows)
-			fmt.Printf("%s› Proceed with %d clones? [y/N]: %s", pad+White, selected, NC)
+			fmt.Println()
+			fmt.Printf("%s[NOTE] %d clones is above the recommended limit (%d Clone%s) for your RAM.%s\n", Amber, selected, rec, plural(rec), NC)
+			fmt.Printf("%s       Android Low Memory Killer (LMK) may force-close background clones.%s\n", Gray, NC)
+			fmt.Printf("%s› Proceed with %d clones anyway? [y/N]: %s", White, selected, NC)
 			conf := strings.ToLower(strings.TrimSpace(readLine()))
 			if conf != "y" && conf != "yes" {
 				continue
 			}
 		}
 
-		// Verify installed packages
+		// Verify installed packages before proceeding
 		missing, ok := checkInstalledClones(selected)
 		if !ok {
-			termW, termH := detectTerminalSize()
-			missingRows := []BoxRow{
-				{Type: RowCentered, CustomText: "[!] CLONE APP NOT INSTALLED", CustomColor: Bold + Red},
-				{Type: RowSeparator},
-				{Type: RowSubtitle, CustomText: "The following clone app(s) are not", CustomColor: Red},
-				{Type: RowSubtitle, CustomText: "installed on this device:", CustomColor: Red},
-			}
+			fmt.Println()
+			fmt.Printf("%s┌──────────────────────────────────────────┐%s\n", Red, NC)
+			fmt.Printf("%s│%s  %s%-38s%s  %s│%s\n", Red, NC, Bold, "[!] CLONE APP NOT INSTALLED", NC, Red, NC)
+			fmt.Printf("%s├──────────────────────────────────────────┤%s\n", Red, NC)
+			fmt.Printf("%s│%s  The following clone app(s) are not     %s│%s\n", Red, NC, Red, NC)
+			fmt.Printf("%s│%s  installed on this device:              %s│%s\n", Red, NC, Red, NC)
 			for _, m := range missing {
-				missingRows = append(missingRows, BoxRow{
-					Type: RowSubtitle, CustomText: "  • " + m, CustomColor: Amber,
-				})
+				fmt.Printf("%s│%s    %s• %-34s%s %s│%s\n", Red, NC, Amber, truncate(m, 34), NC, Red, NC)
 			}
-			missingRows = append(missingRows, BoxRow{Type: RowBlank})
-			missingRows = append(missingRows, BoxRow{Type: RowSubtitle, CustomText: "Cannot proceed. Please install the", CustomColor: White})
+			fmt.Printf("%s│%s                                          %s│%s\n", Red, NC, Red, NC)
+			fmt.Printf("%s│%s  %sCannot proceed.%s Please install the     %s│%s\n", Red, NC, White, NC, Red, NC)
 			if selected > 1 {
-				missingRows = append(missingRows, BoxRow{Type: RowSubtitle, CustomText: "missing APK(s) or select fewer clones.", CustomColor: Red})
+				fmt.Printf("%s│%s  missing APK(s) or select fewer clones. %s│%s\n", Red, NC, Red, NC)
 			} else {
-				missingRows = append(missingRows, BoxRow{Type: RowSubtitle, CustomText: "missing APK before running Nefarious.", CustomColor: Red})
+				fmt.Printf("%s│%s  missing APK before running Nefarious.  %s│%s\n", Red, NC, Red, NC)
 			}
-			fmt.Print(renderCenteredBox("MISSING_CLONES", missingRows, termW, termH, Red))
-			fmt.Printf("\n%s%sPress [ENTER] to choose another clone count...%s", pad, White, NC)
+			fmt.Printf("%s└──────────────────────────────────────────┘%s\n", Red, NC)
+			fmt.Printf("\n%sPress [ENTER] to choose another clone count...%s", White, NC)
 			readLine()
 			continue
 		}
 
 		cloneCount = selected
 		activePackages = allPackages[:cloneCount]
-		setDashboardStatus(fmt.Sprintf("%d Clones Selected", cloneCount), Green)
 		break
 	}
 }
 
 func configureTargetExperience() {
 	for {
-		pad := getMenuLeftPad()
-		rows := []BoxRow{
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Select the game your clones will farm in.",
-				CustomColor: White,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Sentinel will keep accounts connected 24/7.",
-				CustomColor: Dim,
-			},
-			BoxRow{Type: RowSeparator},
-			{
-				Type:       RowKeyValue,
-				Label:      "[1] Steal An Egg ",
-				LabelColor: Green,
-				Value:      "Public Server (Default)",
-				ValueColor: Green,
-			},
-			{
-				Type:       RowKeyValue,
-				Label:      "[2] Custom Game  ",
-				LabelColor: White,
-				Value:      "Paste Game Link / Place ID",
-				ValueColor: Dim,
-			},
-			{
-				Type:       RowKeyValue,
-				Label:      "[3] Private VIP  ",
-				LabelColor: White,
-				Value:      "Private Server Share Link",
-				ValueColor: Dim,
-			},
-			BoxRow{Type: RowSeparator},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Tip: Press [ENTER] to farm Steal An Egg (Default)",
-				CustomColor: Green,
-			},
-		}
-		drawStepCard("2. TARGET EXPERIENCE", "Roblox Auto-Join & Farm Target", rows)
-
-		fmt.Printf("%s› Selection [1-3] (default: 1): %s", pad+White, NC)
+		drawBanner()
+		fmt.Printf("%s── %s%s2. Target Experience%s %s────────────────────%s\n", Gray, White, Bold, NC, Gray, NC)
+		fmt.Printf("%sSelect the Roblox game to launch:%s\n\n", Gray, NC)
+		fmt.Printf("  %s[1]%s Steal An Egg (Public Server)\n", White, NC)
+		fmt.Printf("      %sID: 107778070777162%s\n\n", Dim, NC)
+		fmt.Printf("  %s[2]%s Custom Game (Public Server)\n", White, NC)
+		fmt.Printf("      %sPaste public game link or Place ID%s\n\n", Dim, NC)
+		fmt.Printf("  %s[3]%s Private Server (VIP / Share Link)\n", White, NC)
+		fmt.Printf("      %sPaste share link (e.g. https://www.roblox.com/share?code=...&type=Server)%s\n\n", Dim, NC)
+		fmt.Printf("%s› Selection [1-3] (default: 1): %s", White, NC)
 
 		choice := strings.TrimSpace(readLine())
 
@@ -3206,13 +845,10 @@ func configureTargetExperience() {
 		} else if choice == "2" {
 			goBack := false
 			for {
-				drawStepCard("CUSTOM EXPERIENCE", "Enter Place ID or Game URL", []BoxRow{
-					{Type: RowSubtitle, CustomText: "Paste your Roblox game URL or Place ID.", CustomColor: White},
-					{Type: RowSubtitle, CustomText: "Example: roblox.com/games/107778070777162", CustomColor: Dim},
-					{Type: RowSeparator},
-					{Type: RowSubtitle, CustomText: "Type 'back' to return to menu.", CustomColor: Cyan},
-				})
-				fmt.Printf("%s› URL / Place ID: %s", pad+White, NC)
+				fmt.Println()
+				fmt.Printf("%s── Custom Public Experience ───────────────%s\n", Gray, NC)
+				fmt.Printf("%sPaste full game link, or type 'back':%s\n", Gray, NC)
+				fmt.Printf("%s› URL / Place ID: %s", White, NC)
 
 				link := strings.TrimSpace(readLine())
 
@@ -3237,132 +873,144 @@ func configureTargetExperience() {
 				}
 
 				if customID == "" {
-					drawAlertCard("ERROR", "[!] INVALID GAME ID", "Could not detect Place ID.", "Enter a valid game URL or numeric ID.", "")
-					time.Sleep(1500 * time.Millisecond)
+					fmt.Printf("%s[!] Could not detect Place ID. Enter a valid game URL or numeric ID.%s\n", Red, NC)
 					continue
 				}
 
 				cName := ""
 				reName := regexp.MustCompile(`/games/[0-9]+/([^/?]*)`)
 				if m := reName.FindStringSubmatch(link); len(m) > 1 && m[1] != "" {
-					cleanSlug := strings.ReplaceAll(m[1], "-", " ")
-					cleanSlug = strings.ReplaceAll(cleanSlug, "_", " ")
-					words := strings.Fields(cleanSlug)
-					for idx, w := range words {
-						if len(w) > 0 {
-							words[idx] = strings.ToUpper(w[:1]) + w[1:]
-						}
-					}
-					cName = strings.Join(words, " ")
+					cName = strings.ReplaceAll(m[1], "-", " ")
 				}
-
 				if cName == "" {
-					drawStepCard("EXPERIENCE NAME", "Display Name for Dashboard", []BoxRow{
-						{Type: RowSubtitle, CustomText: "Enter a friendly name for this game.", CustomColor: White},
-						{Type: RowSubtitle, CustomText: "Example: Blox Fruits or Fisch", CustomColor: Dim},
-						{Type: RowSeparator},
-						{Type: RowSubtitle, CustomText: "Press [ENTER] for default naming.", CustomColor: Cyan},
-					})
-					fmt.Printf("%s› Game Name: %s", pad+White, NC)
-					nameInput := strings.TrimSpace(readLine())
-					if nameInput != "" {
-						cName = nameInput
-					} else {
-						cName = "Custom Experience (" + customID + ")"
-					}
+					cName = "Game " + customID
 				}
 
-				gameURL = "roblox://placeId=" + customID
-				gameName = cName
-				break
+				fmt.Println()
+				fmt.Printf("%sDetected Parameters:%s\n", Gray, NC)
+				fmt.Printf("  %sType     :%s %sPublic Server%s\n", Gray, NC, White, NC)
+				fmt.Printf("  %sPlace ID :%s %s%s%s\n", Gray, NC, White, customID, NC)
+				fmt.Printf("  %sName     :%s %s%s%s\n\n", Gray, NC, White, cName, NC)
+				fmt.Printf("%s› Confirm configuration? [Y/n]: %s", White, NC)
+
+				confirm := strings.ToLower(strings.TrimSpace(readLine()))
+				if confirm == "" || confirm == "y" || confirm == "yes" {
+					gameURL = "roblox://placeId=" + customID
+					gameName = cName
+					return
+				}
 			}
-			if !goBack {
-				break
+			if goBack {
+				continue
 			}
 		} else if choice == "3" {
 			goBack := false
+			psCache := filepath.Join(getHomeDir(), ".nefhub_ps_cache")
+			cachedPSName := ""
+			cachedPSURL := ""
+			if data, err := os.ReadFile(psCache); err == nil {
+				parts := strings.Split(strings.TrimSpace(string(data)), "|")
+				if len(parts) >= 2 {
+					cachedPSName = parts[0]
+					cachedPSURL = parts[1]
+				} else if len(parts) == 1 {
+					cachedPSURL = parts[0]
+				}
+			}
+
 			for {
-				drawStepCard("PRIVATE VIP SERVER", "Private Server Share Link", []BoxRow{
-					{Type: RowSubtitle, CustomText: "Paste your private server share link.", CustomColor: White},
-					{Type: RowSubtitle, CustomText: "Example: roblox.com/share?code=...&type=Server", CustomColor: Dim},
-					{Type: RowSeparator},
-					{Type: RowSubtitle, CustomText: "Type 'back' to return to menu.", CustomColor: Cyan},
-				})
-				fmt.Printf("%s› Private Server URL: %s", pad+White, NC)
+				fmt.Println()
+				fmt.Printf("%s── Private Server Configuration ───────────%s\n", Gray, NC)
+				if cachedPSURL != "" {
+					fmt.Printf("%sSaved Private Server Detected:%s\n", Gray, NC)
+					if cachedPSName != "" {
+						fmt.Printf("  Name: %s%s%s\n", White, cachedPSName, NC)
+					}
+					fmt.Printf("  URL : %s%s%s\n\n", Cyan, truncate(cachedPSURL, 38), NC)
+					fmt.Printf("%sPress [ENTER] to use saved Private Server, or paste new / type 'back':%s\n", White, NC)
+				} else {
+					fmt.Printf("%sPaste Private Server share link or VIP URL, or type 'back':%s\n", Gray, NC)
+					fmt.Printf("%sExample: https://www.roblox.com/share?code=91d4e592ecee2247aac83ee8c2b785f5&type=Server%s\n", Dim, NC)
+				}
+				fmt.Printf("%s› Private Server URL: %s", White, NC)
 
 				link := strings.TrimSpace(readLine())
+				link = strings.Trim(link, "\"'")
 
 				if strings.ToLower(link) == "back" {
 					goBack = true
 					break
 				}
 
-				if !strings.Contains(link, "roblox.com") && !strings.Contains(link, "roblox://") {
-					drawAlertCard("ERROR", "[!] INVALID VIP LINK", "Must be a valid Roblox share link.", "", "")
-					time.Sleep(1500 * time.Millisecond)
+				if link == "" && cachedPSURL != "" {
+					gameURL = cachedPSURL
+					if cachedPSName != "" {
+						gameName = cachedPSName
+					} else {
+						gameName = "Private Server [VIP]"
+					}
+					return
+				}
+
+				if link == "" {
+					fmt.Printf("%s[!] Private Server URL cannot be empty.%s\n", Red, NC)
 					continue
 				}
 
-				drawStepCard("VIP SERVER NAME", "Display Name for Dashboard", []BoxRow{
-					{Type: RowSubtitle, CustomText: "Enter a display name for this VIP server.", CustomColor: White},
-					{Type: RowSubtitle, CustomText: "Example: Steal An Egg [VIP]", CustomColor: Dim},
-				})
-				fmt.Printf("%s› VIP Server Name: %s", pad+White, NC)
-				nameInput := strings.TrimSpace(readLine())
-				if nameInput == "" {
-					nameInput = "Private Server Experience"
-				}
-				if !strings.Contains(nameInput, "[VIP]") {
-					nameInput += " [VIP]"
+				if !strings.Contains(link, "roblox.com") && !strings.Contains(link, "roblox://") {
+					fmt.Printf("%s[!] Invalid URL. Expected a Roblox link (e.g. https://www.roblox.com/share?code=...&type=Server)%s\n", Red, NC)
+					continue
 				}
 
-				gameURL = link
-				gameName = nameInput
-				break
+				psName := ""
+				fmt.Printf("%s› Enter Experience Name (optional, default: Private Server): %s", White, NC)
+				nameInput := strings.TrimSpace(readLine())
+				if nameInput != "" {
+					if !strings.Contains(nameInput, "[VIP]") {
+						psName = nameInput + " [VIP]"
+					} else {
+						psName = nameInput
+					}
+				} else {
+					reName := regexp.MustCompile(`/games/[0-9]+/([^/?]*)`)
+					if m := reName.FindStringSubmatch(link); len(m) > 1 && m[1] != "" {
+						psName = strings.ReplaceAll(m[1], "-", " ") + " [VIP]"
+					} else {
+						psName = "Private Server [VIP]"
+					}
+				}
+
+				fmt.Println()
+				fmt.Printf("%sDetected Parameters:%s\n", Gray, NC)
+				fmt.Printf("  %sType :%s %sPrivate Server (VIP Share Link)%s\n", Gray, NC, Green, NC)
+				fmt.Printf("  %sName :%s %s%s%s\n", Gray, NC, White, psName, NC)
+				fmt.Printf("  %sURL  :%s %s%s%s\n\n", Gray, NC, Cyan, truncate(link, 38), NC)
+				fmt.Printf("%s› Confirm configuration? [Y/n]: %s", White, NC)
+
+				confirm := strings.ToLower(strings.TrimSpace(readLine()))
+				if confirm == "" || confirm == "y" || confirm == "yes" {
+					gameURL = link
+					gameName = psName
+					_ = os.WriteFile(psCache, []byte(fmt.Sprintf("%s|%s", psName, link)), 0600)
+					return
+				}
 			}
-			if !goBack {
-				break
+			if goBack {
+				continue
 			}
 		} else {
-			drawAlertCard("ERROR", "[!] INVALID CHOICE", "Please enter 1, 2, or 3.", "", "")
-			time.Sleep(1500 * time.Millisecond)
+			fmt.Printf("%s[!] Invalid choice. Enter 1, 2, or 3.%s\n", Red, NC)
+			time.Sleep(1 * time.Second)
 		}
 	}
 }
 
 func configureSentinel() {
-	pad := getMenuLeftPad()
-	rows := []BoxRow{
-		{
-			Type:        RowSubtitle,
-			CustomText:  "Sentinel is your 24/7 background guard.",
-			CustomColor: White,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "• Auto-rejoins if disconnected or kicked (273/277)",
-			CustomColor: Cyan,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "• Auto-restarts frozen or crashed clones",
-			CustomColor: Cyan,
-		},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "• Keeps your accounts farming without manual fix",
-			CustomColor: Cyan,
-		},
-		BoxRow{Type: RowSeparator},
-		{
-			Type:        RowSubtitle,
-			CustomText:  "Recommended: Keep Enabled (Press ENTER for Yes)",
-			CustomColor: Green,
-		},
-	}
-	drawStepCard("3. SENTINEL IN-GAME GUARD", "Automated 24/7 Watchdog & Auto-Rejoin", rows)
-
-	fmt.Printf("%s› Enable Sentinel monitor? [Y/n] (default: Y): %s", pad+White, NC)
+	drawBanner()
+	fmt.Printf("%s── %s%s3. Sentinel Crash & In-Game Guard%s %s─────────%s\n", Gray, White, Bold, NC, Gray, NC)
+	fmt.Printf("%sActively monitors if clones are dead, frozen,%s\n", Gray, NC)
+	fmt.Printf("%sor disconnected to lobby, auto-rejoining.%s\n\n", Gray, NC)
+	fmt.Printf("%s› Enable Sentinel monitor? [Y/n]: %s", White, NC)
 
 	for {
 		choice := strings.ToLower(strings.TrimSpace(readLine()))
@@ -3373,9 +1021,8 @@ func configureSentinel() {
 			enableRejoin = false
 			break
 		}
-		fmt.Printf("%s%sPlease enter Y or N: %s", pad, Red, NC)
+		fmt.Printf("%sPlease enter Y or N: %s", Red, NC)
 	}
-
 }
 
 func configureWebhook() {
@@ -3384,10 +1031,11 @@ func configureWebhook() {
 	if data, err := os.ReadFile(webhookCache); err == nil {
 		cachedWebhook = strings.TrimSpace(string(data))
 	}
-	discordMention = loadDiscordMention()
 
-	pad := getMenuLeftPad()
-	var rows []BoxRow
+	fmt.Println()
+	fmt.Printf("%s── %s%s4. Discord Notifications%s %s────────────────%s\n", Gray, White, Bold, NC, Gray, NC)
+	fmt.Printf("%sSend crash, freeze, and recovery events%s\n", Gray, NC)
+	fmt.Printf("%sdirectly to your Discord channel.%s\n\n", Gray, NC)
 
 	validateURL := func(u string) bool {
 		return strings.HasPrefix(u, "https://discord.com/api/webhooks/") ||
@@ -3395,545 +1043,112 @@ func configureWebhook() {
 	}
 
 	if cachedWebhook != "" {
-		rows = append(rows,
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "Sends live crash, freeze & recovery alerts.",
-				CustomColor: White,
-			},
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Saved : ",
-				LabelColor: Gray,
-				Value:      truncate(cachedWebhook, 32),
-				ValueColor: Cyan,
-			},
-		)
-		if discordMention != "" {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Ping  : ",
-				LabelColor: Gray,
-				Value:      discordMention,
-				ValueColor: Cyan,
-			})
-		} else {
-			rows = append(rows, BoxRow{
-				Type:       RowKeyValue,
-				Label:      "Ping  : ",
-				LabelColor: Gray,
-				Value:      "Disabled (No User ID)",
-				ValueColor: Dim,
-			})
-		}
-		rows = append(rows,
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "• Press [ENTER] to use saved webhook",
-				CustomColor: Green,
-			},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "• Type 'none' to disable Discord alerts",
-				CustomColor: Dim,
-			},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "• Or paste a new Discord Webhook URL",
-				CustomColor: Dim,
-			},
-		)
-		drawStepCard("4. DISCORD NOTIFICATIONS", "Live alerts & crash reports", rows)
-
-		fmt.Printf("%s› Action (default: keep saved): %s", pad+White, NC)
+		fmt.Printf("%s[INFO] Saved Webhook:%s\n", Gray, NC)
+		fmt.Printf("       %s%s...%s\n\n", Cyan, truncate(cachedWebhook, 36), NC)
+		fmt.Printf("%sPress [ENTER] to use saved webhook, or enter new / 'none':%s\n", White, NC)
+		fmt.Printf("%s› %s", White, NC)
 		input := strings.TrimSpace(readLine())
 
 		if input == "" {
 			discordWebhook = cachedWebhook
+			fmt.Printf("%s[OK] Using saved Discord webhook.%s\n", Green, NC)
+			time.Sleep(1 * time.Second)
 		} else if strings.ToLower(input) == "none" || strings.ToLower(input) == "no" {
 			discordWebhook = ""
 			_ = os.Remove(webhookCache)
-			saveDiscordMention("")
-			return
+			fmt.Printf("%s[INFO] Discord webhook disabled.%s\n", Gray, NC)
+			time.Sleep(1 * time.Second)
 		} else {
 			for {
 				if validateURL(input) {
 					discordWebhook = input
 					_ = os.WriteFile(webhookCache, []byte(discordWebhook), 0600)
-					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected with custom banner support.", 3066993)
+					fmt.Printf("%s[OK] Dispatching test notification to channel...%s\n", Green, NC)
+					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected.", 3066993)
+					time.Sleep(2 * time.Second)
 					break
 				}
-				drawAlertCard("ERROR", "[!] INVALID WEBHOOK URL", "Must start with https://discord.com/api/webhooks/", "", "")
-				fmt.Printf("%s› Webhook URL: %s", pad+White, NC)
+				fmt.Printf("%s[!] Invalid Discord URL. Must begin with https://discord.com/api/webhooks/%s\n", Red, NC)
+				fmt.Printf("%s› Webhook URL: %s", White, NC)
 				input = strings.TrimSpace(readLine())
 			}
 		}
 	} else {
-		rows = append(rows,
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "Sends real-time alerts to your Discord channel.",
-				CustomColor: White,
-			},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "Optional! You can safely skip if not using Discord.",
-				CustomColor: Dim,
-			},
-			BoxRow{Type: RowSeparator},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "• [Y] Set up a Discord Webhook URL",
-				CustomColor: White,
-			},
-			BoxRow{
-				Type:        RowSubtitle,
-				CustomText:  "• [N] Skip Discord alerts (Press ENTER)",
-				CustomColor: Green,
-			},
-		)
-		drawStepCard("4. DISCORD NOTIFICATIONS", "Live alerts & crash reports", rows)
-
-		fmt.Printf("%s› Configure Discord webhook? [y/N] (default: N): %s", pad+White, NC)
+		fmt.Printf("%s› Configure Discord webhook? [y/N]: %s", White, NC)
 		choice := strings.ToLower(strings.TrimSpace(readLine()))
 		if choice == "y" || choice == "yes" {
-			drawStepCard("DISCORD WEBHOOK URL", "Paste Webhook URL from Discord Channel", []BoxRow{
-				{Type: RowSubtitle, CustomText: "In Discord: Channel Settings > Integrations", CustomColor: White},
-				{Type: RowSubtitle, CustomText: "> Webhooks > New Webhook > Copy Webhook URL.", CustomColor: Dim},
-			})
 			for {
-				fmt.Printf("%s› Webhook URL: %s", pad+White, NC)
+				fmt.Printf("%s› Webhook URL: %s", White, NC)
 				input := strings.TrimSpace(readLine())
 				if validateURL(input) {
 					discordWebhook = input
 					_ = os.WriteFile(webhookCache, []byte(discordWebhook), 0600)
-					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected with custom banner support.", 3066993)
+					fmt.Printf("%s[OK] Dispatching test notification to channel...%s\n", Green, NC)
+					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected.", 3066993)
+					time.Sleep(2 * time.Second)
 					break
 				}
-				drawAlertCard("ERROR", "[!] INVALID WEBHOOK URL", "Must start with https://discord.com/api/webhooks/", "", "")
+				fmt.Printf("%s[!] Invalid Discord URL. Must begin with https://discord.com/api/webhooks/%s\n", Red, NC)
 			}
 		} else {
 			discordWebhook = ""
-			return
-		}
-	}
-
-	// Configure user mention option inside its own step card!
-	if discordWebhook != "" {
-		currentPingDesc := "None (Skipped)"
-		if discordMention != "" {
-			currentPingDesc = discordMention
-		}
-		drawStepCard("DISCORD USER PING", "Optional Crash & Freeze Mentions", []BoxRow{
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Get tagged in Discord when an account crashes.",
-				CustomColor: White,
-			},
-			BoxRow{Type: RowSeparator},
-			{
-				Type:       RowKeyValue,
-				Label:      "Current : ",
-				LabelColor: Gray,
-				Value:      currentPingDesc,
-				ValueColor: Cyan,
-			},
-			BoxRow{Type: RowSeparator},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "How: Enter your 18-digit Discord User ID.",
-				CustomColor: Cyan,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Tip: Press [ENTER] to skip (no pings needed).",
-				CustomColor: Dim,
-			},
-		})
-		fmt.Printf("%s› Discord User ID (or [ENTER] for none): %s", pad+White, NC)
-		mInput := strings.TrimSpace(readLine())
-		if mInput != "" {
-			if !strings.HasPrefix(mInput, "<@") {
-				discordMention = fmt.Sprintf("<@%s>", mInput)
-			} else {
-				discordMention = mInput
-			}
-			saveDiscordMention(discordMention)
 		}
 	}
 }
 
-// ============================================================================
-// INSTANCE LAUNCH & ORCHESTRATION
-// ============================================================================
-
 func launchInitialInstances() {
-	for i := 0; i < cloneCount; i++ {
-		pkg := activePackages[i]
-		displayName := fmt.Sprintf("Clone %d", i+1)
+	writeLog("INIT", fmt.Sprintf("Session started with %d clones on %s", cloneCount, gameName))
+	runAnimatedCountdown("Initializing runtime...", 3, "READY", "Runtime initialized")
+	fmt.Println()
+
+	fmt.Printf("%s── Launching Clones ────────────────────────%s\n", Gray, NC)
+	for i, pkg := range activePackages {
+		cloneNum := i + 1
+		displayName := fmt.Sprintf("Clone %d", cloneNum)
+		currTime := time.Now().Format("15:04:05")
 
 		recentlyLaunchedMu.Lock()
 		recentlyLaunchedPkg = pkg
 		recentlyLaunchedMu.Unlock()
-		_ = os.WriteFile("/sdcard/nefarious_active_clone.txt", []byte(fmt.Sprintf("%s|%s", displayName, pkg)), 0644)
+		_ = os.WriteFile("/sdcard/nefarious_active_clone.txt", []byte(fmt.Sprintf("%d|%s", cloneNum, pkg)), 0644)
 
-		markCloneLaunched(pkg)
-
-		drawLaunchStatusCard(i+1, cloneCount, "Starting Client Engine", "Initializing APK engine...")
-		var outLaunch []byte
-		var errLaunch error
-		if checkRoot() {
-			cmdStr := fmt.Sprintf("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p %s", pkg)
-			outLaunch, errLaunch = exec.Command("su", "-c", cmdStr).CombinedOutput()
-		} else {
-			outLaunch, errLaunch = exec.Command("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg).CombinedOutput()
-		}
-		if errLaunch != nil || strings.Contains(string(outLaunch), "Error") {
-			safeLog("  %s[LAUNCH LOG]%s %s: %s", Amber, NC, displayName, strings.TrimSpace(string(outLaunch)))
-		}
-
-		runAnimatedCountdown(fmt.Sprintf("Warming engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
-
-		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", "Injecting game place URL intent...")
-		injectTime := time.Now().Format("15:04:05")
-		safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", injectTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
-		// First VIEW intent pulse
-		if checkRoot() {
-			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
-			_ = exec.Command("su", "-c", cmdStr).Run()
-		} else {
-			_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
-		}
-		// 5-second interval before dual pulse (stable logic pattern)
-		time.Sleep(5 * time.Second)
-		// Second VIEW intent pulse — guarantees connection without lobby stall
-		if checkRoot() {
-			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
-			_ = exec.Command("su", "-c", cmdStr).Run()
-		} else {
-			_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
-		}
-
-		if i < cloneCount-1 {
-			drawLaunchStatusCard(i+1, cloneCount, "Stabilizing Memory", "Cooling down before launching next clone...")
-			runAnimatedCountdown(fmt.Sprintf("Stabilizing memory (%s)...", displayName), 15, "STABLE", fmt.Sprintf("%s stabilized", displayName))
-		}
-	}
-
-
-
-	if enableRejoin {
-		drawSentinelActiveCard()
-	}
-}
-
-// ============================================================================
-// SENTINEL ENGINE (CRASH / FREEZE / RECOVERY)
-// ============================================================================
-
-type RecoveryRequest struct {
-	Pkg         string
-	DisplayName string
-	IsANR       bool
-	Timestamp   string
-}
-
-var (
-	recoveryQueueMu        sync.Mutex
-	recoveryQueue          []RecoveryRequest
-	currentlyRecoveringPkg string
-	recoveryWorkerRunning  bool
-)
-
-func enqueueRecovery(pkg, displayName string, isANR bool) {
-	networkMu.RLock()
-	netUp := networkOnline
-	networkMu.RUnlock()
-	if !netUp {
-		return
-	}
-
-	if isCloneRecoveringOrCooldown(pkg) {
-		return
-	}
-
-	recoveringMu.Lock()
-	if recoveringClones[pkg] {
-		recoveringMu.Unlock()
-		return
-	}
-	recoveringClones[pkg] = true
-	recoveringMu.Unlock()
-
-	recoveryQueueMu.Lock()
-	alreadyQueued := false
-	for _, req := range recoveryQueue {
-		if req.Pkg == pkg {
-			alreadyQueued = true
-			break
-		}
-	}
-	if !alreadyQueued && currentlyRecoveringPkg != pkg {
-		recoveryQueue = append(recoveryQueue, RecoveryRequest{
-			Pkg:         pkg,
-			DisplayName: displayName,
-			IsANR:       isANR,
-			Timestamp:   time.Now().Format("15:04:05"),
-		})
-		safeLog("[%s] %s[QUEUE]%s    %s added to recovery queue (%d pending in queue)...",
-			time.Now().Format("15:04:05"), Amber, NC, displayName, len(recoveryQueue))
-	}
-	syncDashboardQueueState()
-
-	startWorker := false
-	if !recoveryWorkerRunning {
-		recoveryWorkerRunning = true
-		startWorker = true
-	}
-	recoveryQueueMu.Unlock()
-
-	if startWorker {
-		go recoveryWorkerLoop()
-	}
-
-	dashboardMu.Lock()
-	active := isMonitoringActive
-	hasCountdown := currentDashboard.ActionStep != ""
-	dashboardMu.Unlock()
-	if active && !hasCountdown {
-		drawSummaryCard()
-	}
-}
-
-func syncDashboardQueueState() {
-	var queuedNames []string
-	for _, req := range recoveryQueue {
-		queuedNames = append(queuedNames, req.DisplayName)
-	}
-
-	dashboardMu.Lock()
-	if len(queuedNames) > 0 {
-		currentDashboard.QueueInfo = fmt.Sprintf("%d Pending (%s)", len(queuedNames), strings.Join(queuedNames, ", "))
-		if currentlyRecoveringPkg != "" {
-			activeName := getCloneDisplayName(currentlyRecoveringPkg)
-			currentDashboard.Status = fmt.Sprintf("Recovering: %s (%d Queued)", activeName, len(queuedNames))
-			currentDashboard.StatusColor = Amber
-		} else {
-			currentDashboard.Status = fmt.Sprintf("Crash Detected (%d Queued)", len(queuedNames))
-			currentDashboard.StatusColor = Red
-		}
-	} else {
-		currentDashboard.QueueInfo = ""
-		if currentlyRecoveringPkg != "" {
-			activeName := getCloneDisplayName(currentlyRecoveringPkg)
-			currentDashboard.Status = "Recovering: " + activeName
-			currentDashboard.StatusColor = Cyan
-		}
-	}
-	dashboardMu.Unlock()
-}
-
-func recoveryWorkerLoop() {
-	for {
-		recoveryQueueMu.Lock()
-		if len(recoveryQueue) == 0 {
-			currentlyRecoveringPkg = ""
-			recoveryWorkerRunning = false
-			syncDashboardQueueState()
-			recoveryQueueMu.Unlock()
-
-			dashboardMu.Lock()
-			active := isMonitoringActive
-			hasCountdown := currentDashboard.ActionStep != ""
-			dashboardMu.Unlock()
-			if active && !hasCountdown {
-				drawSummaryCard()
-			}
-			return
-		}
-
-		req := recoveryQueue[0]
-		recoveryQueue = recoveryQueue[1:]
-		currentlyRecoveringPkg = req.Pkg
-		syncDashboardQueueState()
-		recoveryQueueMu.Unlock()
-
-		dashboardMu.Lock()
-		active := isMonitoringActive
-		hasCountdown := currentDashboard.ActionStep != ""
-		dashboardMu.Unlock()
-		if active && !hasCountdown {
-			drawSummaryCard()
-		}
-
-		executeCloneRecovery(req.Pkg, req.DisplayName, req.IsANR)
-
-		recoveringMu.Lock()
-		delete(recoveringClones, req.Pkg)
-		recoveringMu.Unlock()
-
-		// Apply 30s post-recovery cooldown to eliminate residual/trailing logcat re-triggers
-		setCloneRecoveryCooldown(req.Pkg, 30*time.Second)
-	}
-}
-
-func recoverClone(pkg, displayName string, isANR bool) {
-	enqueueRecovery(pkg, displayName, isANR)
-}
-
-func executeCloneRecovery(pkg, displayName string, isANR bool) {
-	networkMu.RLock()
-	netUp := networkOnline
-	networkMu.RUnlock()
-	if !netUp {
-		return
-	}
-
-	eventTime := time.Now().Format("15:04:05")
-	logTimestamp := time.Now().Format("2006-01-02 15:04:05")
-
-	// Refresh live system resources
-	res := getSystemResources()
-	cloneMem := getCloneMemoryUsage(pkg, gameName)
-
-	ramDesc := fmt.Sprintf("~%d MB (%s)", cloneMem.RAMMB, cloneMem.GameProfile)
-	if !cloneMem.IsEstimated && cloneMem.PID > 0 {
-		ramDesc = fmt.Sprintf("%d MB RSS (PID %d)", cloneMem.RAMMB, cloneMem.PID)
-	}
-
-	if isANR {
-		setDashboardEvent("Recovering: "+displayName, Amber, "ANR", displayName+" Unresponsive", ramDesc, eventTime)
-		safeLog("[%s] %s[ANR]%s      %s%s%s unresponsive (freeze). Rebooting...", eventTime, Amber, NC, White, displayName, NC)
-		writeLog("ANR", fmt.Sprintf("%s unresponsive", displayName))
-		sendFreezeWebhook(displayName, pkg, gameName, res, cloneMem, logTimestamp)
-	} else {
-		setDashboardEvent("Recovering: "+displayName, Red, "CRASH", displayName+" Terminated", ramDesc, eventTime)
-		if !cloneMem.IsEstimated && cloneMem.PID > 0 {
-			safeLog("[%s] %s[CRASH]%s    %s%s%s process terminated (Last RAM: %d MB, PID: %d). Recovering...", eventTime, Red, NC, White, displayName, NC, cloneMem.RAMMB, cloneMem.PID)
-		} else {
-			safeLog("[%s] %s[CRASH]%s    %s%s%s process terminated. Recovering...", eventTime, Red, NC, White, displayName, NC)
-		}
-		writeLog("CRASH", fmt.Sprintf("%s terminated", displayName))
-		sendCrashWebhook(displayName, pkg, gameName, res, cloneMem, logTimestamp)
-	}
-
-	// Live Resource display on console
-	safeLog("[%s] %s[RESOURCE]%s  RAM: %s%.1f/%.1f GB (%.0f%%)%s | CPU: %s%.1f%%%s",
-		eventTime, Cyan, NC, White, res.UsedRAMGB, res.TotalRAMGB, res.RAMUsagePercent, NC, White, res.CPUUsagePercent, NC)
-
-	// Queue recovery so multiple instances don't spike CPU/RAM simultaneously
-	globalRecoveryLock.Lock()
-	defer globalRecoveryLock.Unlock()
-
-	networkMu.RLock()
-	netUp = networkOnline
-	networkMu.RUnlock()
-	if !netUp {
-		return
-	}
-
-	setDashboardEvent("Recovering: "+displayName, Cyan, "RECOVERING", displayName+" Restarting...", ramDesc, time.Now().Format("15:04:05"))
-
-	// 1. Force-stop to clear stuck instance
-	_ = exec.Command("am", "force-stop", pkg).Run()
-	time.Sleep(1 * time.Second)
-
-	recentlyLaunchedMu.Lock()
-	recentlyLaunchedPkg = pkg
-	recentlyLaunchedMu.Unlock()
-	_ = os.WriteFile("/sdcard/nefarious_active_clone.txt", []byte(fmt.Sprintf("%s|%s", displayName, pkg)), 0644)
-
-	// 2. Launch client engine
-	markCloneLaunched(pkg)
-	if checkRoot() {
-		cmdStr := fmt.Sprintf("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p %s", pkg)
-		_ = exec.Command("su", "-c", cmdStr).Run()
-	} else {
+		safeLog("[%s] %s[LAUNCH]%s   Launching %s%s%s...", currTime, Gray, NC, White, displayName, NC)
 		_ = exec.Command("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg).Run()
-	}
 
-	// 3. Full 10-second client engine initialization animated countdown
-	runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
+		runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
 
-	// 4. First VIEW intent pulse
-	injectTime := time.Now().Format("15:04:05")
-	safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", injectTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
-	if checkRoot() {
-		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
-		_ = exec.Command("su", "-c", cmdStr).Run()
-	} else {
+		joinTime := time.Now().Format("15:04:05")
+		safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", joinTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
 		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
-	}
 
-	// 5-second interval before dual pulse (stable logic pattern — prevents lobby stall)
-	time.Sleep(5 * time.Second)
-
-	// 5. Second VIEW intent pulse — guarantees connection
-	if checkRoot() {
-		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
-		_ = exec.Command("su", "-c", cmdStr).Run()
-	} else {
-		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
-	}
-
-	reopenTime := time.Now().Format("15:04:05")
-	safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", reopenTime, Green, NC, White, displayName, NC, gameName)
-	writeLog("RESTORE", fmt.Sprintf("%s recovered", displayName))
-
-	// 6. Staggered stabilization countdown
-	runAnimatedCountdown(fmt.Sprintf("Cooling down (%s)...", displayName), 20, "READY", fmt.Sprintf("Cooldown complete (%s)", displayName))
-
-	stableTime := time.Now().Format("15:04:05")
-	writeLog("STABLE", fmt.Sprintf("%s verified online", displayName))
-
-	res2 := getSystemResources()
-	var cloneMem2 CloneResourceReport
-	for attempt := 0; attempt < 4; attempt++ {
-		cloneMem2 = getCloneMemoryUsage(pkg, gameName)
-		if !cloneMem2.IsEstimated && cloneMem2.PID > 0 {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	restoredRAMDesc := fmt.Sprintf("~%d MB (%s)", cloneMem2.RAMMB, cloneMem2.GameProfile)
-	if !cloneMem2.IsEstimated && cloneMem2.PID > 0 {
-		restoredRAMDesc = fmt.Sprintf("%d MB RSS (PID %d)", cloneMem2.RAMMB, cloneMem2.PID)
-	}
-
-	setDashboardEvent("Active - "+displayName+" Restored", Green, "RESTORED", displayName+" Resynchronized", restoredRAMDesc, stableTime)
-
-	if !cloneMem2.IsEstimated && cloneMem2.PID > 0 {
-		safeLog("[%s] %s[STABLE]%s   %s%s%s online (RAM: %d MB, PID: %d). Monitoring resumed.", stableTime, Green, NC, White, displayName, NC, cloneMem2.RAMMB, cloneMem2.PID)
-	} else {
-		safeLog("[%s] %s[STABLE]%s   %s%s%s online. Monitoring resumed.", stableTime, Green, NC, White, displayName, NC)
-	}
-
-	sendRecoveryWebhook(displayName, pkg, gameName, res2, cloneMem2)
-
-	// Post-recovery stabilization: do not touch or re-tile other running clones to prevent ping-pong reopen loops
-
-	// Check if more clones are waiting in queue
-	recoveryQueueMu.Lock()
-	hasMore := len(recoveryQueue) > 0
-	recoveryQueueMu.Unlock()
-
-	if hasMore {
-		// Immediately proceed to next queued clone
-		time.Sleep(1 * time.Second)
-	} else {
-		// Queue is empty: display restored status for 5 seconds, then return to normal monitoring
 		time.Sleep(5 * time.Second)
-		recoveryQueueMu.Lock()
-		moreQueued := len(recoveryQueue) > 0
-		recoveryQueueMu.Unlock()
-		if !moreQueued {
-			clearDashboardEvent()
-			setDashboardStatus("Monitoring 24/7 (Auto-Rejoin)", Green)
+		altURL := gameURL
+		if strings.HasPrefix(gameURL, "roblox://placeId=") {
+			altURL = strings.Replace(gameURL, "roblox://placeId=", "roblox://experiences/start?placeId=", 1)
+		} else if strings.HasPrefix(gameURL, "roblox://experiences/start?placeId=") {
+			altURL = strings.Replace(gameURL, "roblox://experiences/start?placeId=", "roblox://placeId=", 1)
+		}
+		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", altURL, "-p", pkg).Run()
+
+		syncTime := time.Now().Format("15:04:05")
+		safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", syncTime, Green, NC, White, displayName, NC, gameName)
+		writeLog("LAUNCH_OK", displayName)
+
+		if i < len(activePackages)-1 {
+			nextNum := cloneNum + 1
+			runAnimatedCountdown(fmt.Sprintf("Cooling down before Clone %d...", nextNum), 20, "READY", "Cooldown complete")
 		}
 	}
+
+	safeLog("%s────────────────────────────────────────────%s", Gray, NC)
+	if enableRejoin {
+		safeLog("%s[ACTIVE]     All %d clone%s synchronized.%s", Green, cloneCount, plural(cloneCount), NC)
+		safeLog("%s[SENTINEL]   Active In-Game & Crash Sentinel running.%s", Cyan, NC)
+		safeLog("%s[INFO]       Press Ctrl+C to terminate session.%s", Gray, NC)
+	} else {
+		safeLog("%s[DONE]       All %d clone%s launched. Exiting.%s", Green, cloneCount, plural(cloneCount), NC)
+	}
+	safeLog("%s────────────────────────────────────────────%s\n", Gray, NC)
 }
 
 func startSentinelMonitor() {
@@ -3941,9 +1156,9 @@ func startSentinelMonitor() {
 	_ = exec.Command("logcat", "-c").Run()
 	time.Sleep(1 * time.Second)
 
-	filterRegex := regexp.MustCompile(`WIN DEATH|has died|am_crash|ANR in|am_anr|Error Code: 273|Error Code: 277|Same account launched|Disconnected from`)
+	filterRegex := regexp.MustCompile(`WIN DEATH|has died|am_kill|am_crash|ANR in|am_anr|Force stopping|Error Code: 273|Error Code: 277|Error Code:|Same account launched|Disconnected from`)
 	anrRegex := regexp.MustCompile(`ANR in|am_anr`)
-	disconnectRegex := regexp.MustCompile(`Error Code: 273|Error Code: 277|Same account launched|Disconnected from`)
+	disconnectRegex := regexp.MustCompile(`Error Code:|Same account launched|Disconnected from`)
 
 	for {
 		cmd := exec.Command("logcat")
@@ -3964,7 +1179,7 @@ func startSentinelMonitor() {
 				continue
 			}
 
-			// Ignore individual crash events if network is offline
+			// Ignore individual crash events if network is offline or full recovery is underway
 			networkMu.RLock()
 			netUp := networkOnline
 			networkMu.RUnlock()
@@ -3975,33 +1190,32 @@ func startSentinelMonitor() {
 			for i, pkg := range activePackages {
 				matchesPkg := strings.Contains(line, pkg)
 				if !matchesPkg && disconnectRegex.MatchString(line) {
-					if cached, ok := telemetryStore.Get(pkg); ok && cached.PID > 0 {
-						if strings.Contains(line, strconv.Itoa(cached.PID)) {
-							matchesPkg = true
-						}
-					}
-					if !matchesPkg {
-						out, err := exec.Command("pidof", pkg).Output()
-						if err == nil {
-							pids := strings.Fields(string(out))
-							for _, pid := range pids {
-								if pid != "" && strings.Contains(line, pid) {
-									matchesPkg = true
-									break
-								}
+					out, err := exec.Command("pidof", pkg).Output()
+					if err == nil {
+						pids := strings.Fields(string(out))
+						for _, pid := range pids {
+							if pid != "" && strings.Contains(line, pid) {
+								matchesPkg = true
+								break
 							}
 						}
 					}
 				}
 
 				if matchesPkg {
-					if isCloneRecoveringOrCooldown(pkg) {
-						continue
-					}
 					cloneNum := i + 1
 					displayName := fmt.Sprintf("Clone %d", cloneNum)
 					isANR := anrRegex.MatchString(line)
-					enqueueRecovery(pkg, displayName, isANR)
+
+					recoveringMu.Lock()
+					if recoveringClones[pkg] {
+						recoveringMu.Unlock()
+						continue
+					}
+					recoveringClones[pkg] = true
+					recoveringMu.Unlock()
+
+					go recoverClone(pkg, displayName, isANR)
 				}
 			}
 		}
@@ -4010,9 +1224,82 @@ func startSentinelMonitor() {
 	}
 }
 
-// ============================================================================
-// NETWORK INTEGRITY & CONNECTION MONITOR
-// ============================================================================
+func recoverClone(pkg, displayName string, isANR bool) {
+	defer func() {
+		recoveringMu.Lock()
+		delete(recoveringClones, pkg)
+		recoveringMu.Unlock()
+	}()
+
+	networkMu.RLock()
+	netUp := networkOnline
+	networkMu.RUnlock()
+	if !netUp {
+		return
+	}
+
+	eventTime := time.Now().Format("15:04:05")
+	logTimestamp := time.Now().Format("2006-01-02 15:04:05")
+
+	if isANR {
+		safeLog("[%s] %s[ANR]%s      %s%s%s unresponsive (freeze). Rebooting...", eventTime, Amber, NC, White, displayName, NC)
+		writeLog("ANR", fmt.Sprintf("%s unresponsive", displayName))
+		sendWebhook("Freeze Detected (ANR)", fmt.Sprintf("**%s** stopped responding at %s. Rebooting...", displayName, logTimestamp), 15105570)
+	} else {
+		safeLog("[%s] %s[CRASH]%s    %s%s%s process terminated. Recovering...", eventTime, Red, NC, White, displayName, NC)
+		writeLog("CRASH", fmt.Sprintf("%s terminated", displayName))
+		sendWebhook("Crash Detected", fmt.Sprintf("**%s** crashed at %s. Relaunching...", displayName, logTimestamp), 15158332)
+	}
+
+	// Queue recovery so multiple instances don't spike CPU/RAM simultaneously
+	globalRecoveryLock.Lock()
+	defer globalRecoveryLock.Unlock()
+
+	networkMu.RLock()
+	netUp = networkOnline
+	networkMu.RUnlock()
+	if !netUp {
+		return
+	}
+
+	// 1. Force-stop to clear stuck instances
+	_ = exec.Command("am", "force-stop", pkg).Run()
+	time.Sleep(1 * time.Second)
+
+	recentlyLaunchedMu.Lock()
+	recentlyLaunchedPkg = pkg
+	recentlyLaunchedMu.Unlock()
+	_ = os.WriteFile("/sdcard/nefarious_active_clone.txt", []byte(fmt.Sprintf("%s|%s", displayName, pkg)), 0644)
+
+	// 2. Launch client engine
+	_ = exec.Command("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg).Run()
+
+	// 3. Full 10-second client engine initialization animated countdown
+	runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
+
+	// 4. First game connection intent
+	joinTime := time.Now().Format("15:04:05")
+	safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", joinTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
+	_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
+
+	// 5. 5-second interval before second intent pulse
+	time.Sleep(5 * time.Second)
+
+	// 6. Dual Intent Pulse (Guarantees connection without lobby stall)
+	_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
+
+	reopenTime := time.Now().Format("15:04:05")
+	safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", reopenTime, Green, NC, White, displayName, NC, gameName)
+	writeLog("RESTORE", fmt.Sprintf("%s recovered", displayName))
+
+	// 7. Staggered stabilization countdown
+	runAnimatedCountdown(fmt.Sprintf("Cooling down (%s)...", displayName), 20, "READY", fmt.Sprintf("Cooldown complete (%s)", displayName))
+
+	stableTime := time.Now().Format("15:04:05")
+	safeLog("[%s] %s[STABLE]%s   %s%s%s online. Monitoring resumed.", stableTime, Green, NC, White, displayName, NC)
+	writeLog("STABLE", fmt.Sprintf("%s verified online", displayName))
+	sendWebhook("Recovered", fmt.Sprintf("**%s** is back online as of %s.", displayName, time.Now().Format("2006-01-02 15:04:05")), 3066993)
+}
 
 func isInternetConnected() bool {
 	conn, err := net.DialTimeout("tcp", "1.1.1.1:443", 2*time.Second)
@@ -4077,6 +1364,7 @@ func waitForInternetAtStartup() {
 
 func getPublicIP() (string, error) {
 	client := &http.Client{Timeout: 4 * time.Second}
+	// 1. Direct Cloudflare IP query (fast, bypasses DNS resolution issues)
 	resp, err := client.Get("https://1.1.1.1/cdn-cgi/trace")
 	if err == nil {
 		defer resp.Body.Close()
@@ -4092,6 +1380,7 @@ func getPublicIP() (string, error) {
 		}
 	}
 
+	// 2. Fallback to api.ipify.org
 	resp2, err2 := client.Get("https://api.ipify.org")
 	if err2 == nil {
 		defer resp2.Body.Close()
@@ -4109,13 +1398,6 @@ func relaunchAllClones(reason string) {
 	globalRecoveryLock.Lock()
 	defer globalRecoveryLock.Unlock()
 
-	recoveryQueueMu.Lock()
-	recoveryQueue = nil
-	currentlyRecoveringPkg = ""
-	recoveryQueueMu.Unlock()
-
-	setDashboardStatus("Relaunching Clones ("+reason+")", Amber)
-
 	recoveringMu.Lock()
 	recoveringClones = make(map[string]bool)
 	for _, pkg := range activePackages {
@@ -4123,45 +1405,63 @@ func relaunchAllClones(reason string) {
 	}
 	recoveringMu.Unlock()
 
+	defer func() {
+		time.Sleep(2 * time.Second)
+		recoveringMu.Lock()
+		recoveringClones = make(map[string]bool)
+		recoveringMu.Unlock()
+	}()
+
+	safeLog("\n%s────────────────────────────────────────────%s", Gray, NC)
+	safeLog("%s[NET RESET]   Force-stopping & relaunching all clones (%s)...%s", Amber, reason, NC)
+	writeLog("NET_RESET", reason)
+
 	for _, pkg := range activePackages {
 		_ = exec.Command("am", "force-stop", pkg).Run()
 	}
 	time.Sleep(2 * time.Second)
 
 	for i, pkg := range activePackages {
-		displayName := fmt.Sprintf("Clone %d", i+1)
-		nowTime := time.Now().Format("15:04:05")
-		safeLog("[%s] %s[RELOAD]%s    Relaunching %s%s%s after %s...", nowTime, Cyan, NC, White, displayName, NC, reason)
+		cloneNum := i + 1
+		displayName := fmt.Sprintf("Clone %d", cloneNum)
+		currTime := time.Now().Format("15:04:05")
 
 		recentlyLaunchedMu.Lock()
 		recentlyLaunchedPkg = pkg
 		recentlyLaunchedMu.Unlock()
-		_ = os.WriteFile("/sdcard/nefarious_active_clone.txt", []byte(fmt.Sprintf("%s|%s", displayName, pkg)), 0644)
 
-		markCloneLaunched(pkg)
+		safeLog("[%s] %s[LAUNCH]%s   Relaunching %s%s%s...", currTime, Gray, NC, White, displayName, NC)
 		_ = exec.Command("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg).Run()
-		runAnimatedCountdown(fmt.Sprintf("Warming client engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
 
+		runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
+
+		joinTime := time.Now().Format("15:04:05")
+		safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", joinTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
 		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
 
-		if i < cloneCount-1 {
-			runAnimatedCountdown(fmt.Sprintf("Stabilizing memory (%s)...", displayName), 15, "STABLE", fmt.Sprintf("%s stabilized", displayName))
+		time.Sleep(5 * time.Second)
+		altURL := gameURL
+		if strings.HasPrefix(gameURL, "roblox://placeId=") {
+			altURL = strings.Replace(gameURL, "roblox://placeId=", "roblox://experiences/start?placeId=", 1)
+		} else if strings.HasPrefix(gameURL, "roblox://experiences/start?placeId=") {
+			altURL = strings.Replace(gameURL, "roblox://experiences/start?placeId=", "roblox://placeId=", 1)
+		}
+		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", altURL, "-p", pkg).Run()
+
+		syncTime := time.Now().Format("15:04:05")
+		safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", syncTime, Green, NC, White, displayName, NC, gameName)
+		writeLog("NET_RELAUNCH_OK", displayName)
+
+		if i < len(activePackages)-1 {
+			nextNum := cloneNum + 1
+			runAnimatedCountdown(fmt.Sprintf("Cooling down before Clone %d...", nextNum), 20, "READY", "Cooldown complete")
 		}
 	}
 
-	recoveringMu.Lock()
-	recoveringClones = make(map[string]bool)
-	recoveringMu.Unlock()
-
-	for _, pkg := range activePackages {
-		setCloneRecoveryCooldown(pkg, 30*time.Second)
-	}
-
-
-	safeLog("\n%s[ALL RESTORED] All %d Roblox clones successfully recovered after %s.%s\n", Green, cloneCount, reason, NC)
-	writeLog("ALL_RESTORED", fmt.Sprintf("All %d clones recovered after %s.", cloneCount, reason))
+	safeLog("%s────────────────────────────────────────────%s", Gray, NC)
+	safeLog("%s[ACTIVE]     All %d clone%s recovered and synchronized.%s", Green, cloneCount, plural(cloneCount), NC)
+	safeLog("%s────────────────────────────────────────────%s\n", Gray, NC)
 	sendWebhook("All Clones Restored", fmt.Sprintf("All %d Roblox clones successfully recovered after %s.", cloneCount, reason), 3066993)
-	setDashboardStatus(fmt.Sprintf("Restored: All %d Clones Online", cloneCount), Green)
 }
 
 func startNetworkMonitor() {
@@ -4198,12 +1498,11 @@ func startNetworkMonitor() {
 			networkMu.Lock()
 			networkOnline = false
 			networkMu.Unlock()
-			setDashboardStatus("Offline: Connection Lost", Red)
 
 			nowTime := time.Now().Format("15:04:05")
-			safeLog("\n[%s] %s[LOST CONNECTION]%s Internet connection lost! Force-stopping all clones...", nowTime, Red, NC)
+			safeLog("\n[%s] %s[NET LOST]%s   Internet connection lost! Force-stopping all clones...", nowTime, Red, NC)
 			writeLog("NET_DISCONNECT", "Internet connection lost. Force-stopping all clones.")
-			sendRichWebhook(EventNetwork, "Lost Connection", "Internet connection lost. Force-stopping all Roblox clones to prevent freeze.", 15158332, nil)
+			sendWebhook("Network Lost", "Internet connection lost. Force-stopping all Roblox clones to prevent freeze.", 15158332)
 
 			globalRecoveryLock.Lock()
 			for _, pkg := range activePackages {
@@ -4219,7 +1518,7 @@ func startNetworkMonitor() {
 			offlineTick++
 			if offlineTick%6 == 0 {
 				currTime := time.Now().Format("15:04:05")
-				safeLog("[%s] %s[LOST CONNECTION]%s Waiting for network connection to restore...", currTime, Gray, NC)
+				safeLog("[%s] %s[OFFLINE]%s    No internet connection. Waiting for network...", currTime, Gray, NC)
 			}
 			continue
 		}
@@ -4230,27 +1529,26 @@ func startNetworkMonitor() {
 			networkMu.Lock()
 			networkOnline = true
 			networkMu.Unlock()
-			setDashboardStatus("Online: Connection Restored", Green)
 
 			nowTime := time.Now().Format("15:04:05")
-			safeLog("\n[%s] %s[CONNECTION RESTORED]%s Internet reconnected. Relaunching all clones...", nowTime, Green, NC)
-			writeLog("NET_RECONNECT", "Internet connection restored. Relaunching all clones.")
-			sendRichWebhook(EventNetwork, "Connection Restored", "Internet connection restored. Relaunching and resynchronizing all clones.", 3066993, nil)
+			safeLog("\n[%s] %s[NET RESTORED]%s Internet reconnected (IP: %s%s%s). Relaunching all clones...", nowTime, Green, NC, Cyan, currentIP, NC)
+			writeLog("NET_RECONNECT", fmt.Sprintf("Internet reconnected (IP: %s). Relaunching all clones.", currentIP))
+			sendWebhook("Network Restored", fmt.Sprintf("Internet reconnected with IP: `%s`. Relaunching all clones...", currentIP), 3066993)
 
 			lastIP = currentIP
-			relaunchAllClones("Connection Restored")
+			relaunchAllClones("Network Reconnected")
 			continue
 		}
 
-		// Case 3: Public IP changed while online
+		// Case 3: Public IP changed while online (e.g. mobile IP rotated, proxy switched, VPN reconnected)
 		if isOnline && lastIP != "" && currentIP != lastIP {
 			nowTime := time.Now().Format("15:04:05")
-			safeLog("\n[%s] %s[IP CHANGED]%s IP switch detected. Force-stopping and relaunching clones...", nowTime, Amber, NC)
+			safeLog("\n[%s] %s[IP CHANGED]%s IP switch detected: %s%s%s ➔ %s%s%s. Force-stopping and relaunching...", nowTime, Amber, NC, Gray, lastIP, NC, Cyan, currentIP, NC)
 			writeLog("IP_CHANGE", fmt.Sprintf("IP changed from %s to %s. Relaunching all clones.", lastIP, currentIP))
-			sendWebhook("IP Change Detected", "Device IP network route changed. Force-stopping and relaunching all clones...", 15105570)
+			sendWebhook("IP Change Detected", fmt.Sprintf("Device IP changed:\n**Old IP:** `%s`\n**New IP:** `%s`\nForce-stopping and relaunching all clones...", lastIP, currentIP), 15105570)
 
 			lastIP = currentIP
-			relaunchAllClones("Network IP Route Changed")
+			relaunchAllClones(fmt.Sprintf("IP Switched to %s", currentIP))
 			continue
 		}
 
@@ -4259,10 +1557,6 @@ func startNetworkMonitor() {
 		}
 	}
 }
-
-// ============================================================================
-// LOCAL BRIDGE HTTP SERVER & SIGNAL SUBSYSTEMS
-// ============================================================================
 
 func startLocalBridgeServer() {
 	mux := http.NewServeMux()
@@ -4362,10 +1656,6 @@ func startLocalBridgeServer() {
 
 		displayName := getCloneDisplayName(targetPkg)
 
-		if isCloneRecoveringOrCooldown(targetPkg) {
-			return
-		}
-
 		currTime := time.Now().Format("15:04:05")
 		safeLog("\n[%s] %s[ALERT]%s     %s%s%s reported: %s%s%s (%s)",
 			currTime, Red, NC, White, displayName, NC, Amber, reason, NC, detail)
@@ -4376,7 +1666,15 @@ func startLocalBridgeServer() {
 				displayName, player, reason, truncate(detail, 500)),
 			15158332)
 
-		enqueueRecovery(targetPkg, displayName, false)
+		recoveringMu.Lock()
+		if recoveringClones[targetPkg] {
+			recoveringMu.Unlock()
+			return
+		}
+		recoveringClones[targetPkg] = true
+		recoveringMu.Unlock()
+
+		go recoverClone(targetPkg, displayName, false)
 	})
 
 	// 4. Log endpoint
@@ -4432,23 +1730,6 @@ func startLocalBridgeServer() {
 		writeLog(tag, fmt.Sprintf("%s: %s", displayName, msg))
 	})
 
-	// 5. Ask AI endpoint
-	mux.HandleFunc("/ask_ai", func(w http.ResponseWriter, r *http.Request) {
-		player := strings.TrimSpace(r.URL.Query().Get("player"))
-		cloneParam := strings.TrimSpace(r.URL.Query().Get("clone"))
-		query := strings.TrimSpace(r.URL.Query().Get("query"))
-		if query == "" {
-			query = strings.TrimSpace(r.URL.Query().Get("q"))
-		}
-
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-
-		if query != "" {
-			sendAskAIWebhook(player, cloneParam, query)
-		}
-	})
-
 	server := &http.Server{
 		Addr:    ":21420",
 		Handler: mux,
@@ -4458,7 +1739,91 @@ func startLocalBridgeServer() {
 }
 
 func startCloudSignalPoller() {
-	// Remote cloud signal polling disabled for open-source / local-only operation.
+	client := &http.Client{Timeout: 4 * time.Second}
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	type SignalResponse struct {
+		HasSignal  bool   `json:"has_signal"`
+		Pkg        string `json:"pkg"`
+		Player     string `json:"player"`
+		ErrorType  string `json:"error_type"`
+		Detail     string `json:"detail"`
+		ReportedAt int64  `json:"reported_at"`
+	}
+
+	for range ticker.C {
+		if myHWID == "" {
+			continue
+		}
+
+		pollURL := fmt.Sprintf("%s/check-signal?hwid=%s", AuthAPIURL, myHWID)
+		resp, err := client.Get(pollURL)
+		if err != nil || resp.StatusCode != 200 {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		var sig SignalResponse
+		if err := json.Unmarshal(body, &sig); err == nil && sig.HasSignal {
+			targetPkg := sig.Pkg
+			if targetPkg == "" && sig.Player != "" {
+				playerPkgMu.RLock()
+				targetPkg = playerPkgMap[sig.Player]
+				playerPkgMu.RUnlock()
+			}
+			if targetPkg == "" {
+				recentlyLaunchedMu.Lock()
+				targetPkg = recentlyLaunchedPkg
+				recentlyLaunchedMu.Unlock()
+			}
+			if targetPkg == "" && len(activePackages) > 0 {
+				targetPkg = activePackages[0]
+			}
+
+			displayName := getCloneDisplayName(targetPkg)
+			currTime := time.Now().Format("15:04:05")
+
+			// Check if it's an online or reconnect status signal
+			if sig.ErrorType == "ONLINE" || sig.ErrorType == "LUA_ONLINE" {
+				safeLog("[%s] %s[CONNECT]%s   %s connected and monitoring.",
+					currTime, Green, NC, displayName)
+				writeLog("CONNECT", fmt.Sprintf("%s: Online", displayName))
+				continue
+			}
+
+			if strings.Contains(sig.ErrorType, "RECONNECT") && !strings.Contains(sig.ErrorType, "FAILED") {
+				safeLog("[%s] %s[RECONNECT]%s %s: %s",
+					currTime, Amber, NC, displayName, sig.Detail)
+				writeLog("RECONNECT", fmt.Sprintf("%s: %s", displayName, sig.Detail))
+				continue
+			}
+
+			safeLog("\n[%s] %s[SIGNAL]%s    %s reported: %s%s%s (%s)",
+				currTime, Red, NC, displayName, Amber, sig.ErrorType, NC, sig.Detail)
+			writeLog("CLOUD_SIGNAL", fmt.Sprintf("%s: %s - %s", displayName, sig.ErrorType, sig.Detail))
+
+			sendWebhook("In-Game Kick (Cloud Signal)",
+				fmt.Sprintf("**%s**\n**Player:** `%s`\n**Status:** `%s`\n**Detail:** ```%s```\nForce-stopping and relaunching...",
+					displayName, sig.Player, sig.ErrorType, truncate(sig.Detail, 500)),
+				15158332)
+
+			recoveringMu.Lock()
+			if recoveringClones[targetPkg] {
+				recoveringMu.Unlock()
+				continue
+			}
+			recoveringClones[targetPkg] = true
+			recoveringMu.Unlock()
+
+			go recoverClone(targetPkg, displayName, false)
+		}
+	}
 }
 
 func startEventLogWatcher() {
@@ -4502,10 +1867,14 @@ func startEventLogWatcher() {
 				for i, p := range activePackages {
 					cloneTag := fmt.Sprintf("Clone %d", i+1)
 					if strings.Contains(line, cloneTag) || strings.Contains(line, p) {
-						if isCloneRecoveringOrCooldown(p) {
-							continue
+						recoveringMu.Lock()
+						if !recoveringClones[p] {
+							recoveringClones[p] = true
+							recoveringMu.Unlock()
+							go recoverClone(p, cloneTag, false)
+						} else {
+							recoveringMu.Unlock()
 						}
-						enqueueRecovery(p, cloneTag, false)
 					}
 				}
 			}
@@ -4540,21 +1909,20 @@ func startKickSignalWatcher() {
 			displayName = "Clone 1"
 		}
 
-		if isCloneRecoveringOrCooldown(targetPkg) {
-			continue
-		}
-
 		currTime := time.Now().Format("15:04:05")
 		safeLog("\n[%s] %s[AUTO-REJOIN]%s %s disconnected. Rejoining %s%s%s...",
 			currTime, Amber, NC, displayName, White, gameName, NC)
 
-		enqueueRecovery(targetPkg, displayName, false)
+		recoveringMu.Lock()
+		if !recoveringClones[targetPkg] {
+			recoveringClones[targetPkg] = true
+			recoveringMu.Unlock()
+			go recoverClone(targetPkg, displayName, false)
+		} else {
+			recoveringMu.Unlock()
+		}
 	}
 }
-
-// ============================================================================
-// MAIN ENTRYPOINT
-// ============================================================================
 
 func main() {
 	c := make(chan os.Signal, 1)
@@ -4565,7 +1933,6 @@ func main() {
 		os.Exit(0)
 	}()
 
-	initResizeWatcher()
 	initInputReader()
 
 	myHWID = getDeviceHWID()
@@ -4585,31 +1952,15 @@ func main() {
 	drawSummaryCard()
 	fmt.Println()
 
-	hideSoftKeyboard()
 	launchInitialInstances()
-	hideSoftKeyboard()
-
-	setDashboardStatus("Monitoring 24/7 (Auto-Rejoin)", Green)
-
-	dashboardMu.Lock()
-	isMonitoringActive = true
-	dashboardMu.Unlock()
-
-	drawSummaryCard()
-	hideSoftKeyboard()
-
 
 	if enableRejoin {
 		go startLocalBridgeServer()
 		go startCloudSignalPoller()
-		// startEventLogWatcher and startKickSignalWatcher disabled:
-		// Both poll files every 500ms adding unnecessary I/O overhead.
-		// The logcat sentinel (startSentinelMonitor) is the primary crash detector.
+		go startEventLogWatcher()
+		go startKickSignalWatcher()
 		go startNetworkMonitor()
-		go startResourceMonitor()
-		go startTelemetrySampler()
 		startSentinelMonitor()
-	} else {
-		select {}
 	}
 }
+
