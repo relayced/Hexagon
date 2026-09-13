@@ -74,8 +74,7 @@ if [ ! -s "$LOCAL_BIN" ]; then
 fi
 
 chmod +x "$LOCAL_BIN"
-echo -e "${GREEN}[✓] Binary ready! Launching Nefarious Hub...${NC}"
-echo ""
+clear
 
 # Execute with TTY attachment for interactive menu
 if [ -e /dev/tty ]; then
