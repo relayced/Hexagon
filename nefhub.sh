@@ -91,10 +91,8 @@ var (
 	gameName        string
 	gameURL         string
 	cloneCount      int
-	enableRejoin            bool
-	enableAutoSortTabs      bool
-	enableAlwaysOnTopClones bool
-	activePackages          []string
+	enableRejoin   bool
+	activePackages []string
 
 	serverPlaceID  string
 	serverGameName string
@@ -202,138 +200,7 @@ func isProcessAlive(pid int) bool {
 	return true
 }
 
-// getScreenDimensions queries hardware display resolution and orientation via Android shell/root wm & dumpsys
-func getScreenDimensions() (w, h int, isLandscape bool) {
-	w, h = 1080, 2400 // standard default
-	wmCmds := []string{
-		"wm size 2>/dev/null",
-		"/system/bin/wm size 2>/dev/null",
-	}
-	if checkRoot() {
-		wmCmds = append(wmCmds, "su -c 'wm size' 2>/dev/null")
-	}
-	for _, cmdStr := range wmCmds {
-		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			re := regexp.MustCompile(`([0-9]+)x([0-9]+)`)
-			if m := re.FindStringSubmatch(string(out)); len(m) >= 3 {
-				pw, _ := strconv.Atoi(m[1])
-				ph, _ := strconv.Atoi(m[2])
-				if pw > 0 && ph > 0 {
-					w, h = pw, ph
-					break
-				}
-			}
-		}
-	}
 
-	// Detect orientation (0 = 0deg portrait, 1 = 90deg landscape, 2 = 180deg portrait, 3 = 270deg landscape)
-	rotCmd := "dumpsys display 2>/dev/null | grep -m1 mCurrentOrientation"
-	if checkRoot() {
-		rotCmd = "su -c 'dumpsys display | grep -m1 mCurrentOrientation' 2>/dev/null"
-	}
-	if out, err := exec.Command("sh", "-c", rotCmd).Output(); err == nil {
-		outStr := string(out)
-		if strings.Contains(outStr, "=1") || strings.Contains(outStr, "=3") {
-			isLandscape = true
-			if w < h {
-				w, h = h, w
-			}
-			return w, h, isLandscape
-		} else if strings.Contains(outStr, "=0") || strings.Contains(outStr, "=2") {
-			isLandscape = false
-			if w > h {
-				w, h = h, w
-			}
-			return w, h, isLandscape
-		}
-	}
-
-	if w > h {
-		isLandscape = true
-	}
-	return w, h, isLandscape
-}
-
-// tileClonesSideBySide arranges already-floating clones side-by-side (Left and Right)
-// without altering or overriding their natural displayed floating size.
-func tileClonesSideBySide() {
-	total := len(activePackages)
-	if total == 0 {
-		return
-	}
-
-	w, h, _ := getScreenDimensions()
-	safeLog("  %s[FLOATING]%s Bringing floating clones to front & positioning side-by-side...", Cyan, NC)
-
-	if total >= 2 {
-		pkg1 := activePackages[0]
-		pkg2 := activePackages[1]
-
-		// 1. Bring Clone 1 to front
-		cmd1 := fmt.Sprintf("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --activity-brought-to-front -p %s", pkg1)
-		_ = exec.Command("sh", "-c", cmd1).Run()
-		if checkRoot() {
-			_ = exec.Command("su", "-c", cmd1).Run()
-		}
-		time.Sleep(200 * time.Millisecond)
-
-		// Position Clone 1 on the Left: slide from center to left
-		if checkRoot() && w > 0 && h > 0 {
-			startX := w / 2
-			startY := h / 3
-			endX := w / 4
-			endY := h / 3
-			dragCmd := fmt.Sprintf("input draganddrop %d %d %d %d 250", startX, startY, endX, endY)
-			_ = exec.Command("su", "-c", dragCmd).Run()
-		}
-
-		time.Sleep(250 * time.Millisecond)
-
-		// 2. Bring Clone 2 to front
-		cmd2 := fmt.Sprintf("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --activity-brought-to-front -p %s", pkg2)
-		_ = exec.Command("sh", "-c", cmd2).Run()
-		if checkRoot() {
-			_ = exec.Command("su", "-c", cmd2).Run()
-		}
-		time.Sleep(200 * time.Millisecond)
-
-		// Position Clone 2 on the Right: slide from center to right
-		if checkRoot() && w > 0 && h > 0 {
-			startX := w / 2
-			startY := h / 3
-			endX := (3 * w) / 4
-			endY := h / 3
-			dragCmd := fmt.Sprintf("input draganddrop %d %d %d %d 250", startX, startY, endX, endY)
-			_ = exec.Command("su", "-c", dragCmd).Run()
-		}
-	} else {
-		// Single clone: bring to front normally
-		pkg := activePackages[0]
-		cmd := fmt.Sprintf("am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --activity-brought-to-front -p %s", pkg)
-		_ = exec.Command("sh", "-c", cmd).Run()
-		if checkRoot() {
-			_ = exec.Command("su", "-c", cmd).Run()
-		}
-	}
-
-	hideSoftKeyboard()
-}
-
-// startAlwaysOnTopGuard is kept as a non-intrusive routine to prevent hammering am start
-// on active game sessions while Termux is in foreground focus.
-func startAlwaysOnTopGuard() {
-	// Disabled to eliminate infinite activity restarts and spam re-opening
-}
-
-// autoSortTabs arranges running Roblox clone tasks in sequential numerical order (Clone 1 to N)
-// side-by-side in floating mode, then safely dismisses the soft keyboard.
-func autoSortTabs() {
-	if !enableAutoSortTabs || len(activePackages) <= 1 {
-		hideSoftKeyboard()
-		return
-	}
-	tileClonesSideBySide()
-}
 
 // ============================================================================
 // ANIMATED SPINNER & THREAD-SAFE CONSOLE SUBSYSTEM
@@ -2680,19 +2547,7 @@ func drawSummaryCard() {
 		ValueColor: discordColor,
 	})
 
-	layoutVal := "STANDARD"
-	layoutColor := Dim
-	if enableAlwaysOnTopClones {
-		layoutVal = "SIDE-BY-SIDE (Always-On-Top)"
-		layoutColor = Cyan
-	}
-	rows = append(rows, BoxRow{
-		Type:       RowStatus,
-		Label:      "Layout    : ",
-		LabelColor: Gray,
-		Value:      layoutVal,
-		ValueColor: layoutColor,
-	})
+
 
 	rows = append(rows,
 		BoxRow{Type: RowSeparator},
@@ -3540,47 +3395,6 @@ func configureSentinel() {
 		fmt.Printf("%s%sPlease enter Y or N: %s", pad, Red, NC)
 	}
 
-	if enableRejoin {
-		tabRows := []BoxRow{
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Option 2: Side-by-Side (Left-to-Right) & Always-On-Top Guard",
-				CustomColor: Cyan,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "• Automatically tiles clones side-by-side (50/50 split) in Freeform",
-				CustomColor: White,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "• Always-On-Top Guard re-elevates clones if Termux steals focus",
-				CustomColor: White,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "• Suppresses soft keyboard to prevent Android 10 window minimizes",
-				CustomColor: Amber,
-			},
-			BoxRow{Type: RowSeparator},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Recommended: Y (Always-On-Top & Side-by-Side Active)",
-				CustomColor: Green,
-			},
-		}
-		drawStepCard("SIDE-BY-SIDE & ALWAYS-ON-TOP", "Android 10 Freeform Multi-Window Guard", tabRows)
-		fmt.Printf("%s› Enable Side-by-Side & Always-On-Top Clones? [Y/n] (default: Y): %s", pad+White, NC)
-		tChoice := strings.ToLower(strings.TrimSpace(readLine()))
-		if tChoice == "" || tChoice == "y" || tChoice == "yes" {
-			enableAlwaysOnTopClones = true
-			enableAutoSortTabs = true
-		} else {
-			enableAlwaysOnTopClones = false
-			enableAutoSortTabs = false
-		}
-	}
-	hideSoftKeyboard()
 }
 
 func configureWebhook() {
@@ -3820,11 +3634,7 @@ func launchInitialInstances() {
 		}
 	}
 
-	// Place clones side-by-side (native split-screen) and refocus
-	autoSortTabs()
-	if enableAlwaysOnTopClones {
-		tileClonesSideBySide()
-	}
+
 
 	if enableRejoin {
 		drawSentinelActiveCard()
@@ -4348,7 +4158,6 @@ func relaunchAllClones(reason string) {
 		setCloneRecoveryCooldown(pkg, 30*time.Second)
 	}
 
-	autoSortTabs()
 
 	safeLog("\n%s[ALL RESTORED] All %d Roblox clones successfully recovered after %s.%s\n", Green, cloneCount, reason, NC)
 	writeLog("ALL_RESTORED", fmt.Sprintf("All %d clones recovered after %s.", cloneCount, reason))
@@ -4789,9 +4598,7 @@ func main() {
 
 	drawSummaryCard()
 	hideSoftKeyboard()
-	if enableAlwaysOnTopClones {
-		go startAlwaysOnTopGuard()
-	}
+
 
 	if enableRejoin {
 		go startLocalBridgeServer()
