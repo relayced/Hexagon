@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1252,11 +1253,11 @@ type BannersConfig struct {
 
 func getDefaultBanners() BannersConfig {
 	return BannersConfig{
-		CrashBanner:    "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/crash_banner.png",
-		FreezeBanner:   "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/freeze_banner.png",
-		RecoveryBanner: "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/recovery_banner.png",
-		AskAIBanner:    "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/ask_ai_banner.png",
-		ResourceBanner: "https://raw.githubusercontent.com/kameskill/autorejoin/main/assets/resource_banner.png",
+		CrashBanner:    "",
+		FreezeBanner:   "",
+		RecoveryBanner: "",
+		AskAIBanner:    "",
+		ResourceBanner: "",
 	}
 }
 
@@ -1267,6 +1268,21 @@ func loadBannersConfig() BannersConfig {
 		_ = json.Unmarshal(data, &cfg)
 	} else {
 		saveBannersConfig(cfg)
+	}
+	if strings.Contains(cfg.CrashBanner, "kameskill/autorejoin") {
+		cfg.CrashBanner = ""
+	}
+	if strings.Contains(cfg.FreezeBanner, "kameskill/autorejoin") {
+		cfg.FreezeBanner = ""
+	}
+	if strings.Contains(cfg.RecoveryBanner, "kameskill/autorejoin") {
+		cfg.RecoveryBanner = ""
+	}
+	if strings.Contains(cfg.AskAIBanner, "kameskill/autorejoin") {
+		cfg.AskAIBanner = ""
+	}
+	if strings.Contains(cfg.ResourceBanner, "kameskill/autorejoin") {
+		cfg.ResourceBanner = ""
 	}
 	return cfg
 }
@@ -1411,20 +1427,52 @@ func sendRichWebhook(eventType WebhookEventType, title, message string, color in
 
 	data, err := json.Marshal(payload)
 	if err != nil {
+		writeLog("WEBHOOK_ERR", fmt.Sprintf("JSON marshal error: %v", err))
 		return
 	}
 
-	go func() {
-		client := &http.Client{Timeout: 6 * time.Second}
-		req, err := http.NewRequest("POST", discordWebhook, bytes.NewBuffer(data))
+	go func(postData []byte, targetURL string) {
+		// 1. Try Go net/http with InsecureSkipVerify (vital for Android Termux root CA handling)
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		}
+		client := &http.Client{
+			Transport: tr,
+			Timeout:   8 * time.Second,
+		}
+
+		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(postData))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.2")
 			resp, err := client.Do(req)
 			if err == nil && resp != nil {
-				_ = resp.Body.Close()
+				defer resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					return // Delivered successfully!
+				}
+				respBody, _ := io.ReadAll(resp.Body)
+				writeLog("WEBHOOK_ERR", fmt.Sprintf("Discord returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody))))
+			} else if err != nil {
+				writeLog("WEBHOOK_ERR", fmt.Sprintf("Go HTTP error: %v", err))
 			}
 		}
-	}()
+
+		// 2. Fallback to Termux's native curl utility
+		cmd := exec.Command("curl", "-s", "-X", "POST",
+			"-H", "Content-Type: application/json",
+			"-H", "User-Agent: Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.2",
+			"--data-binary", "@-",
+			targetURL,
+		)
+		cmd.Stdin = bytes.NewReader(postData)
+		out, cErr := cmd.CombinedOutput()
+		if cErr != nil {
+			writeLog("WEBHOOK_ERR", fmt.Sprintf("curl fallback error: %v (out: %s)", cErr, strings.TrimSpace(string(out))))
+		}
+	}(data, discordWebhook)
 }
 
 // sendWebhook is a backward-compatible wrapper for general events.
@@ -1499,6 +1547,24 @@ func sendRecoveryWebhook(displayName, pkg, game string, res SystemResourceStats,
 	}
 
 	sendRichWebhook(EventRecovery, "✅ Instance Recovered", fmt.Sprintf("**%s** is back online and resynchronized with **%s**.", displayName, game), 3066993, fields)
+}
+
+func sendSessionStartWebhook() {
+	if discordWebhook == "" {
+		return
+	}
+	res := getSystemResources()
+	fields := []DiscordEmbedField{
+		{Name: "🎮 Target Experience", Value: fmt.Sprintf("`%s`", gameName), Inline: true},
+		{Name: "📱 Active Instances", Value: fmt.Sprintf("`%d Clone%s Online`", cloneCount, plural(cloneCount)), Inline: true},
+		{Name: "🛡️ Sentinel Guard", Value: "`ACTIVE (24/7 Watchdog)`", Inline: true},
+		{Name: "💾 System Memory", Value: fmt.Sprintf("%.1f / %.1f GB (%.0f%% Used)", res.UsedRAMGB, res.TotalRAMGB, res.RAMUsagePercent), Inline: false},
+		{Name: "⚡ CPU Cores & Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
+		{Name: "🕒 Started At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
+	}
+	sendRichWebhook(EventGeneral, "🚀 Nefarious Hub — Session Started",
+		fmt.Sprintf("All **%d Roblox instances** are running and synchronized with **%s**.", cloneCount, gameName),
+		3066993, fields)
 }
 
 func sendAskAIWebhook(player, cloneParam, query string) {
@@ -3484,6 +3550,7 @@ func configureWebhook() {
 
 		if input == "" {
 			discordWebhook = cachedWebhook
+			sendWebhook("Sentinel Connected", "Discord alerts verified. Real-time crash, freeze & recovery alerts active.", 3066993)
 		} else if strings.ToLower(input) == "none" || strings.ToLower(input) == "no" {
 			discordWebhook = ""
 			_ = os.Remove(webhookCache)
@@ -3494,7 +3561,7 @@ func configureWebhook() {
 				if validateURL(input) {
 					discordWebhook = input
 					_ = os.WriteFile(webhookCache, []byte(discordWebhook), 0600)
-					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected with custom banner support.", 3066993)
+					sendWebhook("Sentinel Connected", "Discord alerts verified. Real-time crash, freeze & recovery alerts active.", 3066993)
 					break
 				}
 				drawAlertCard("ERROR", "[!] INVALID WEBHOOK URL", "Must start with https://discord.com/api/webhooks/", "", "")
@@ -3541,7 +3608,7 @@ func configureWebhook() {
 				if validateURL(input) {
 					discordWebhook = input
 					_ = os.WriteFile(webhookCache, []byte(discordWebhook), 0600)
-					sendWebhook("Sentinel Connected", "Nefarious Hub monitoring connected with custom banner support.", 3066993)
+					sendWebhook("Sentinel Connected", "Discord alerts verified. Real-time crash, freeze & recovery alerts active.", 3066993)
 					break
 				}
 				drawAlertCard("ERROR", "[!] INVALID WEBHOOK URL", "Must start with https://discord.com/api/webhooks/", "", "")
@@ -4509,6 +4576,9 @@ func startEventLogWatcher() {
 						if isCloneRecoveringOrCooldown(p) {
 							continue
 						}
+						sendWebhook("In-Game Kick Signal",
+							fmt.Sprintf("Sentinel detected kick signal for **%s** in **%s**. Initiating automated auto-rejoin...", cloneTag, gameName),
+							15158332)
 						enqueueRecovery(p, cloneTag, false)
 					}
 				}
@@ -4551,6 +4621,10 @@ func startKickSignalWatcher() {
 		currTime := time.Now().Format("15:04:05")
 		safeLog("\n[%s] %s[AUTO-REJOIN]%s %s disconnected. Rejoining %s%s%s...",
 			currTime, Amber, NC, displayName, White, gameName, NC)
+
+		sendWebhook("In-Game Disconnect Detected",
+			fmt.Sprintf("**%s** disconnected from **%s**. Initiating automated recovery sequence...", displayName, gameName),
+			15158332)
 
 		enqueueRecovery(targetPkg, displayName, false)
 	}
@@ -4602,6 +4676,7 @@ func main() {
 	drawSummaryCard()
 	hideSoftKeyboard()
 
+	sendSessionStartWebhook()
 
 	if enableRejoin {
 		go startLocalBridgeServer()
