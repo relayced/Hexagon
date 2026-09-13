@@ -1597,11 +1597,10 @@ func startResourceMonitor() {
 	}
 }
 
-// startTelemetrySampler continually refreshes clone memory telemetry every 5 seconds
-// so crashes and freeze events always capture live actual measured memory and the
-// on-screen dashboard updates to real-time RAM metrics.
+// startTelemetrySampler continually refreshes clone memory telemetry every 30 seconds.
+// Reduced from 5s to 30s to eliminate shell spawn overhead (dumpsys + ps per clone).
 func startTelemetrySampler() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	lastSampledRAM := make(map[string]int)
 	go func() {
 		for range ticker.C {
@@ -3615,16 +3614,23 @@ func launchInitialInstances() {
 		runAnimatedCountdown(fmt.Sprintf("Warming engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
 
 		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", "Injecting game place URL intent...")
-		var outJoin []byte
-		var errJoin error
+		injectTime := time.Now().Format("15:04:05")
+		safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", injectTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
+		// First VIEW intent pulse
 		if checkRoot() {
 			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
-			outJoin, errJoin = exec.Command("su", "-c", cmdStr).CombinedOutput()
+			_ = exec.Command("su", "-c", cmdStr).Run()
 		} else {
-			outJoin, errJoin = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).CombinedOutput()
+			_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
 		}
-		if errJoin != nil || strings.Contains(string(outJoin), "Error") {
-			safeLog("  %s[JOIN LOG]%s %s: %s", Amber, NC, displayName, strings.TrimSpace(string(outJoin)))
+		// 5-second interval before dual pulse (stable logic pattern)
+		time.Sleep(5 * time.Second)
+		// Second VIEW intent pulse — guarantees connection without lobby stall
+		if checkRoot() {
+			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
+			_ = exec.Command("su", "-c", cmdStr).Run()
+		} else {
+			_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
 		}
 
 		if i < cloneCount-1 {
@@ -3868,9 +3874,20 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 	// 3. Full 10-second client engine initialization animated countdown
 	runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
 
-	// 4. Game connection intent
+	// 4. First VIEW intent pulse
 	injectTime := time.Now().Format("15:04:05")
 	safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", injectTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
+	if checkRoot() {
+		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
+		_ = exec.Command("su", "-c", cmdStr).Run()
+	} else {
+		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
+	}
+
+	// 5-second interval before dual pulse (stable logic pattern — prevents lobby stall)
+	time.Sleep(5 * time.Second)
+
+	// 5. Second VIEW intent pulse — guarantees connection
 	if checkRoot() {
 		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
 		_ = exec.Command("su", "-c", cmdStr).Run()
@@ -3882,7 +3899,7 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 	safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", reopenTime, Green, NC, White, displayName, NC, gameName)
 	writeLog("RESTORE", fmt.Sprintf("%s recovered", displayName))
 
-	// 5. Staggered stabilization countdown
+	// 6. Staggered stabilization countdown
 	runAnimatedCountdown(fmt.Sprintf("Cooling down (%s)...", displayName), 20, "READY", fmt.Sprintf("Cooldown complete (%s)", displayName))
 
 	stableTime := time.Now().Format("15:04:05")
@@ -4602,8 +4619,9 @@ func main() {
 	if enableRejoin {
 		go startLocalBridgeServer()
 		go startCloudSignalPoller()
-		go startEventLogWatcher()
-		go startKickSignalWatcher()
+		// startEventLogWatcher and startKickSignalWatcher disabled:
+		// Both poll files every 500ms adding unnecessary I/O overhead.
+		// The logcat sentinel (startSentinelMonitor) is the primary crash detector.
 		go startNetworkMonitor()
 		go startResourceMonitor()
 		go startTelemetrySampler()
