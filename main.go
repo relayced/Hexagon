@@ -489,12 +489,70 @@ type SystemResourceStats struct {
 	AvailableRAMGB  float64
 	CPUUsagePercent float64
 	CPUCores        int
+	Bitness         int
+	BitnessDesc     string
+}
+
+func getSystemBitness() (int, string) {
+	bits := 32 << (^uint(0) >> 63)
+	arch := runtime.GOARCH
+	switch arch {
+	case "arm64":
+		return 64, "64-bit (ARM64)"
+	case "arm":
+		return 32, "32-bit (ARM)"
+	case "amd64":
+		return 64, "64-bit (x86_64)"
+	default:
+		if bits == 64 {
+			return 64, fmt.Sprintf("64-bit (%s)", arch)
+		}
+		return 32, fmt.Sprintf("32-bit (%s)", arch)
+	}
+}
+
+func getSystemCPUCores() int {
+	// 1. Check physical cores via /sys/devices/system/cpu/present (e.g. "0-7" = 8 cores)
+	// This prevents ARM big.LITTLE sleeping cores from reporting artificially low core counts
+	if data, err := os.ReadFile("/sys/devices/system/cpu/present"); err == nil {
+		str := strings.TrimSpace(string(data))
+		if parts := strings.Split(str, "-"); len(parts) == 2 {
+			if end, err := strconv.Atoi(parts[1]); err == nil && end >= 0 {
+				return end + 1
+			}
+		}
+	}
+
+	// 2. Check /sys/devices/system/cpu/possible
+	if data, err := os.ReadFile("/sys/devices/system/cpu/possible"); err == nil {
+		str := strings.TrimSpace(string(data))
+		if parts := strings.Split(str, "-"); len(parts) == 2 {
+			if end, err := strconv.Atoi(parts[1]); err == nil && end >= 0 {
+				return end + 1
+			}
+		}
+	}
+
+	// 3. Count physical CPU directories /sys/devices/system/cpu/cpu[0-9]+
+	if matches, err := filepath.Glob("/sys/devices/system/cpu/cpu[0-9]*"); err == nil && len(matches) > 0 {
+		return len(matches)
+	}
+
+	// 4. Fallback to runtime.NumCPU()
+	if n := runtime.NumCPU(); n > 0 {
+		return n
+	}
+
+	return 4
 }
 
 // getSystemResources collects kernel-level RAM from /proc/meminfo and CPU from /proc/stat.
 func getSystemResources() SystemResourceStats {
+	bits, bitDesc := getSystemBitness()
 	stats := SystemResourceStats{
-		CPUCores: runtime.NumCPU(),
+		CPUCores:    getSystemCPUCores(),
+		Bitness:     bits,
+		BitnessDesc: bitDesc,
 	}
 
 	// 1. Read /proc/meminfo
@@ -2688,7 +2746,7 @@ func drawSummaryCard() {
 		})
 	}
 
-	cpuStr := fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores)
+	cpuStr := fmt.Sprintf("%.1f%% (%d Cores, %s)", res.CPUUsagePercent, res.CPUCores, res.BitnessDesc)
 	rows = append(rows, BoxRow{
 		Type:       RowKeyValue,
 		Label:      "CPU Load  : ",
@@ -3323,7 +3381,7 @@ func configureConcurrency() {
 
 		sub := "Select number of Roblox clones to run"
 		if res.TotalRAMMB > 0 {
-			sub = fmt.Sprintf("RAM: %.1fGB | CPU: %d Cores (%.0f%%) | Rec: %d Clones", res.TotalRAMGB, res.CPUCores, res.CPUUsagePercent, rec)
+			sub = fmt.Sprintf("RAM: %.1fGB | CPU: %d Cores (%s, %.0f%%) | Rec: %d Clones", res.TotalRAMGB, res.CPUCores, res.BitnessDesc, res.CPUUsagePercent, rec)
 		}
 		drawStepCard("1. INSTANCE CONCURRENCY", sub, rows)
 

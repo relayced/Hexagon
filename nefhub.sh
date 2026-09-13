@@ -41,24 +41,53 @@ echo -e "${PAD}${CYAN}${BOLD}║        Open-Source Termux Automation         �
 echo -e "${PAD}${CYAN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Architecture Detection
-ARCH=$(uname -m)
-case "$ARCH" in
+# Architecture & Bitness Detection (Dual Kernel + Userspace aware)
+USER_ARCH=""
+if command -v dpkg >/dev/null 2>&1; then
+    USER_ARCH=$(dpkg --print-architecture 2>/dev/null || echo "")
+fi
+
+KERNEL_ARCH=$(uname -m 2>/dev/null || echo "")
+LONG_BIT=$(getconf LONG_BIT 2>/dev/null || echo "")
+
+case "$USER_ARCH" in
     aarch64|arm64)
         TARGET_BIN="nefhub_arm64"
+        BIT_DESC="64-bit (aarch64)"
         ;;
-    armv7l|armv8l|arm)
+    arm|armhf|armel)
         TARGET_BIN="nefhub_arm"
+        BIT_DESC="32-bit (arm)"
         ;;
     x86_64|amd64)
         TARGET_BIN="nefhub_amd64"
+        BIT_DESC="64-bit (x86_64)"
+        ;;
+    i686|i386)
+        TARGET_BIN="nefhub_arm"
+        BIT_DESC="32-bit (x86)"
         ;;
     *)
-        TARGET_BIN="nefhub_arm64"
+        if [ "$LONG_BIT" = "32" ]; then
+            TARGET_BIN="nefhub_arm"
+            BIT_DESC="32-bit (Userspace 32-bit)"
+        elif [ "$KERNEL_ARCH" = "aarch64" ] || [ "$KERNEL_ARCH" = "arm64" ]; then
+            TARGET_BIN="nefhub_arm64"
+            BIT_DESC="64-bit (aarch64)"
+        elif [ "$KERNEL_ARCH" = "x86_64" ] || [ "$KERNEL_ARCH" = "amd64" ]; then
+            TARGET_BIN="nefhub_amd64"
+            BIT_DESC="64-bit (x86_64)"
+        elif [ "$KERNEL_ARCH" = "armv7l" ] || [ "$KERNEL_ARCH" = "armv8l" ] || [ "$KERNEL_ARCH" = "arm" ]; then
+            TARGET_BIN="nefhub_arm"
+            BIT_DESC="32-bit (armv7l)"
+        else
+            TARGET_BIN="nefhub_arm64"
+            BIT_DESC="64-bit"
+        fi
         ;;
 esac
 
-echo -e "${PAD}${GRAY}[*] Architecture : ${CYAN}$ARCH${GRAY} -> ${CYAN}$TARGET_BIN${NC}"
+echo -e "${PAD}${GRAY}[*] Architecture : ${CYAN}$BIT_DESC${GRAY} -> ${CYAN}$TARGET_BIN${NC}"
 
 # Ensure curl is available
 if ! command -v curl >/dev/null 2>&1; then
