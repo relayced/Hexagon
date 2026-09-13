@@ -512,37 +512,11 @@ func getSystemBitness() (int, string) {
 }
 
 func getSystemCPUCores() int {
-	// 1. Check physical cores via /sys/devices/system/cpu/present (e.g. "0-7" = 8 cores)
-	// This prevents ARM big.LITTLE sleeping cores from reporting artificially low core counts
-	if data, err := os.ReadFile("/sys/devices/system/cpu/present"); err == nil {
-		str := strings.TrimSpace(string(data))
-		if parts := strings.Split(str, "-"); len(parts) == 2 {
-			if end, err := strconv.Atoi(parts[1]); err == nil && end >= 0 {
-				return end + 1
-			}
-		}
-	}
-
-	// 2. Check /sys/devices/system/cpu/possible
-	if data, err := os.ReadFile("/sys/devices/system/cpu/possible"); err == nil {
-		str := strings.TrimSpace(string(data))
-		if parts := strings.Split(str, "-"); len(parts) == 2 {
-			if end, err := strconv.Atoi(parts[1]); err == nil && end >= 0 {
-				return end + 1
-			}
-		}
-	}
-
-	// 3. Count physical CPU directories /sys/devices/system/cpu/cpu[0-9]+
-	if matches, err := filepath.Glob("/sys/devices/system/cpu/cpu[0-9]*"); err == nil && len(matches) > 0 {
-		return len(matches)
-	}
-
-	// 4. Fallback to runtime.NumCPU()
+	// Respect container/cgroup allocation & CPU affinity (e.g. Redfinger Cloud Phone tier limits)
+	// runtime.NumCPU() returns the actual number of logical CPUs allocated to this process/container
 	if n := runtime.NumCPU(); n > 0 {
 		return n
 	}
-
 	return 4
 }
 
