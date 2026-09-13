@@ -29,6 +29,11 @@ const (
 	VersionURL    = "https://raw.githubusercontent.com/relayced/Hexagon/main/version.txt"
 	LogFileName   = "farming_log.txt"
 
+	CurrentDeltaVersion = "Delta-2.736.1408-02"
+	DeltaDownloadURL    = "https://delta.filenetwork.vip/android.html"
+	DeltaAPIURL         = "https://delta.filenetwork.vip/get_files.php"
+	DiscordInviteURL    = "discord.gg/6jg6PbWrz"
+
 	// ========================================================================
 	// CENTRALIZED TERMINAL UI & DASHBOARD CONFIGURATION
 	// ========================================================================
@@ -2444,6 +2449,13 @@ func drawBanner() {
 			Value:      "@Jep",
 			ValueColor: Cyan,
 		},
+		BoxRow{
+			Type:       RowKeyValue,
+			Label:      "Invite Link : ",
+			LabelColor: Gray,
+			Value:      DiscordInviteURL,
+			ValueColor: Cyan,
+		},
 	)
 
 	box := renderCenteredBox("BANNER", rows, termW, termH, Gray)
@@ -2548,6 +2560,28 @@ func drawSummaryCard() {
 			LabelColor:  Bold + Cyan,
 			RightText:   "[" + tierDisplay + "]",
 			RightColor:  Bold + Green,
+		},
+		{Type: RowSeparator},
+		{
+			Type:       RowKeyValue,
+			Label:      "Script Devs : ",
+			LabelColor: Gray,
+			Value:      "@NightWitch, @Eysdi",
+			ValueColor: White,
+		},
+		{
+			Type:       RowKeyValue,
+			Label:      "Clone Credit: ",
+			LabelColor: Gray,
+			Value:      "@Jep",
+			ValueColor: Cyan,
+		},
+		{
+			Type:       RowKeyValue,
+			Label:      "Invite Link : ",
+			LabelColor: Gray,
+			Value:      DiscordInviteURL,
+			ValueColor: Cyan,
 		},
 		{Type: RowSeparator},
 		{
@@ -3071,7 +3105,7 @@ func checkUpdates() {
 		drawAlertCard("ERROR", "[X] CRITICAL: UPDATE REQUIRED",
 			fmt.Sprintf("Installed v%s is lower than required v%s.", ScriptVersion, latestVersion),
 			"Launch blocked to prevent ban risks and crashing.",
-			"Download latest payload: github.com/kameskill/autorejoin")
+			"Download latest payload: github.com/relayced/Hexagon")
 		fmt.Printf("\n%s[HALTED]%s Update required before continuing. Exiting...\n\n", Red, NC)
 		os.Exit(1)
 	}
@@ -3081,6 +3115,126 @@ func checkUpdates() {
 	} else {
 		safeLog("  %s[OK]%s Version v%s verified and compatible.", Green, NC, ScriptVersion)
 	}
+
+	checkDeltaUpdate(true)
+}
+
+// ============================================================================
+// DELTA EXECUTOR VERSION TRACKING & UPDATE DETECTION
+// ============================================================================
+
+type DeltaAPIResponse struct {
+	LatestAPK []struct {
+		Name         string `json:"name"`
+		Size         int64  `json:"size"`
+		LastModified string `json:"last_modified"`
+		Timestamp    int64  `json:"timestamp"`
+	} `json:"latest_apk"`
+}
+
+var (
+	deltaUpdateNotified = false
+	deltaUpdateMu       sync.Mutex
+	detectedDeltaUpdate = ""
+)
+
+func fetchLatestDeltaVersion() (string, string, error) {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr, Timeout: 8 * time.Second}
+	req, err := http.NewRequest("GET", DeltaAPIURL, nil)
+	var bodyBytes []byte
+	if err == nil {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+		req.Header.Set("Accept", "application/json")
+		resp, err := client.Do(req)
+		if err == nil && resp != nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				bodyBytes, _ = io.ReadAll(resp.Body)
+			}
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		cmd := exec.Command("curl", "-s", "-A", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36", DeltaAPIURL)
+		out, cErr := cmd.Output()
+		if cErr == nil && len(out) > 0 {
+			bodyBytes = out
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		return "", "", fmt.Errorf("failed to reach Delta API")
+	}
+
+	var res DeltaAPIResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return "", "", err
+	}
+
+	if len(res.LatestAPK) == 0 || res.LatestAPK[0].Name == "" {
+		return "", "", fmt.Errorf("no Delta APK found in response")
+	}
+
+	rawName := res.LatestAPK[0].Name
+	cleanName := strings.TrimSuffix(rawName, ".apk")
+	return cleanName, res.LatestAPK[0].LastModified, nil
+}
+
+func checkDeltaUpdate(isStartup bool) {
+	latestName, lastMod, err := fetchLatestDeltaVersion()
+	if err != nil {
+		return
+	}
+
+	if latestName != "" && latestName != CurrentDeltaVersion {
+		deltaUpdateMu.Lock()
+		alreadyNotified := deltaUpdateNotified
+		deltaUpdateNotified = true
+		detectedDeltaUpdate = latestName
+		deltaUpdateMu.Unlock()
+
+		if !alreadyNotified {
+			currTime := time.Now().Format("15:04:05")
+			safeLog("\n[%s] %s[DELTA UPDATE]%s New Delta version detected: %s%s%s (Installed: %s)",
+				currTime, Amber, NC, Bold+White, latestName, NC, CurrentDeltaVersion)
+			safeLog("  %sDownload:%s %s", Cyan, NC, DeltaDownloadURL)
+			writeLog("DELTA_UPDATE", fmt.Sprintf("New Delta: %s (Current: %s)", latestName, CurrentDeltaVersion))
+
+			if isStartup {
+				drawAlertCard("WARN", "[!] DELTA UPDATE AVAILABLE",
+					fmt.Sprintf("Latest : %s", latestName),
+					fmt.Sprintf("Current: %s", CurrentDeltaVersion),
+					fmt.Sprintf("Link: %s", DeltaDownloadURL))
+				time.Sleep(3 * time.Second)
+			} else {
+				setDashboardEvent("Delta Update: "+latestName, Amber, "UPDATE", "New: "+latestName, "", currTime)
+			}
+
+			// Dispatch alert to Discord Webhook
+			fields := []DiscordEmbedField{
+				{Name: "📱 Current Delta Version", Value: fmt.Sprintf("`%s`", CurrentDeltaVersion), Inline: true},
+				{Name: "🚀 New Delta Version", Value: fmt.Sprintf("`%s`", latestName), Inline: true},
+				{Name: "📅 Release Date", Value: fmt.Sprintf("`%s`", lastMod), Inline: true},
+				{Name: "📥 Download Link", Value: fmt.Sprintf("[%s](%s)", DeltaDownloadURL, DeltaDownloadURL), Inline: false},
+				{Name: "🕒 Detected At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
+			}
+			sendRichWebhook(EventGeneral, "⚠️ Delta Executor Update Detected",
+				fmt.Sprintf("A new version of **Delta Executor** has been detected on the official distribution server!\n\nIf your Roblox clones start crashing, freezing, or showing update dialogs, please update your Delta clone APKs."),
+				16753920, fields)
+		}
+	}
+}
+
+func startDeltaUpdatePoller() {
+	ticker := time.NewTicker(20 * time.Minute)
+	go func() {
+		for range ticker.C {
+			checkDeltaUpdate(false)
+		}
+	}()
 }
 
 // ============================================================================
@@ -4686,6 +4840,7 @@ func main() {
 		go startNetworkMonitor()
 		go startResourceMonitor()
 		go startTelemetrySampler()
+		go startDeltaUpdatePoller()
 		startSentinelMonitor()
 	} else {
 		select {}
