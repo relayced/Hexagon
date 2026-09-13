@@ -2083,12 +2083,16 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 		sb.WriteString("\n")
 	}
 
-	// Top Border with smooth curved corners: ╭ ╮
+	if borderColor == "" || borderColor == Gray {
+		borderColor = Cyan
+	}
+
+	// Top Border with double-line corners: ╔ ╗
 	sb.WriteString(padStr)
 	sb.WriteString(borderColor)
-	sb.WriteString("╭")
-	sb.WriteString(strings.Repeat("─", innerSpan))
-	sb.WriteString("╮")
+	sb.WriteString("╔")
+	sb.WriteString(strings.Repeat("═", innerSpan))
+	sb.WriteString("╗")
 	sb.WriteString(NC)
 	sb.WriteString("\n")
 
@@ -2097,9 +2101,9 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 		case RowSeparator:
 			sb.WriteString(padStr)
 			sb.WriteString(borderColor)
-			sb.WriteString("├")
-			sb.WriteString(strings.Repeat("─", innerSpan))
-			sb.WriteString("┤")
+			sb.WriteString("╠")
+			sb.WriteString(strings.Repeat("═", innerSpan))
+			sb.WriteString("╣")
 			sb.WriteString(NC)
 			sb.WriteString("\n")
 
@@ -2125,7 +2129,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 
 			sb.WriteString(padStr)
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString(strings.Repeat(" ", innerPad))
 
@@ -2148,7 +2152,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 
 			sb.WriteString(strings.Repeat(" ", innerPad))
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString("\n")
 
@@ -2182,7 +2186,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 
 				sb.WriteString(padStr)
 				sb.WriteString(borderColor)
-				sb.WriteString("│")
+				sb.WriteString("║")
 				sb.WriteString(NC)
 				sb.WriteString(strings.Repeat(" ", innerPad+leftSpaces))
 				sb.WriteString(r.CustomColor)
@@ -2190,7 +2194,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 				sb.WriteString(NC)
 				sb.WriteString(strings.Repeat(" ", rightSpaces+innerPad))
 				sb.WriteString(borderColor)
-				sb.WriteString("│")
+				sb.WriteString("║")
 				sb.WriteString(NC)
 				sb.WriteString("\n")
 			}
@@ -2216,7 +2220,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 
 						sb.WriteString(padStr)
 						sb.WriteString(borderColor)
-						sb.WriteString("│")
+						sb.WriteString("║")
 						sb.WriteString(NC)
 						sb.WriteString(strings.Repeat(" ", innerPad))
 
@@ -2234,7 +2238,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 						sb.WriteString(strings.Repeat(" ", chGap))
 						sb.WriteString(strings.Repeat(" ", innerPad))
 						sb.WriteString(borderColor)
-						sb.WriteString("│")
+						sb.WriteString("║")
 						sb.WriteString(NC)
 						sb.WriteString("\n")
 					}
@@ -2252,7 +2256,7 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 
 			sb.WriteString(padStr)
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString(strings.Repeat(" ", innerPad))
 			sb.WriteString(r.LabelColor)
@@ -2264,29 +2268,29 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 			sb.WriteString(strings.Repeat(" ", gap))
 			sb.WriteString(strings.Repeat(" ", innerPad))
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString("\n")
 
 		case RowBlank:
 			sb.WriteString(padStr)
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString(strings.Repeat(" ", innerSpan))
 			sb.WriteString(borderColor)
-			sb.WriteString("│")
+			sb.WriteString("║")
 			sb.WriteString(NC)
 			sb.WriteString("\n")
 		}
 	}
 
-	// Bottom Border with smooth curved corners: ╰ ╯
+	// Bottom Border with double-line corners: ╚ ╝
 	sb.WriteString(padStr)
 	sb.WriteString(borderColor)
-	sb.WriteString("╰")
-	sb.WriteString(strings.Repeat("─", innerSpan))
-	sb.WriteString("╯")
+	sb.WriteString("╚")
+	sb.WriteString(strings.Repeat("═", innerSpan))
+	sb.WriteString("╝")
 	sb.WriteString(NC)
 	sb.WriteString("\n")
 
