@@ -17,10 +17,28 @@ GRAY='\033[38;5;244m'
 NC='\033[0m'
 BOLD='\033[1m'
 
-echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║           NEFARIOUS HUB LAUNCHER             ║${NC}"
-echo -e "${CYAN}${BOLD}║        Open-Source Termux Automation         ║${NC}"
-echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
+# Auto-detect terminal width & calculate dynamic horizontal centering
+TERM_COLS=$(tput cols 2>/dev/null || echo 0)
+if [ -z "$TERM_COLS" ] || [ "$TERM_COLS" -le 0 ]; then
+    TERM_COLS=$(stty size 2>/dev/null | awk '{print $2}')
+fi
+if [ -z "$TERM_COLS" ] || [ "$TERM_COLS" -le 0 ]; then
+    TERM_COLS=${COLUMNS:-80}
+fi
+
+BOX_WIDTH=48
+if [ "$TERM_COLS" -gt "$BOX_WIDTH" ]; then
+    PAD_LEN=$(( (TERM_COLS - BOX_WIDTH) / 2 ))
+    PAD=$(printf '%*s' "$PAD_LEN" "")
+else
+    PAD=""
+fi
+
+echo ""
+echo -e "${PAD}${CYAN}${BOLD}╔══════════════════════════════════════════════╗${NC}"
+echo -e "${PAD}${CYAN}${BOLD}║           NEFARIOUS HUB LAUNCHER             ║${NC}"
+echo -e "${PAD}${CYAN}${BOLD}║        Open-Source Termux Automation         ║${NC}"
+echo -e "${PAD}${CYAN}${BOLD}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Architecture Detection
@@ -40,11 +58,11 @@ case "$ARCH" in
         ;;
 esac
 
-echo -e "${GRAY}[*] Device architecture: ${CYAN}$ARCH${GRAY} -> Binary: ${CYAN}$TARGET_BIN${NC}"
+echo -e "${PAD}${GRAY}[*] Architecture : ${CYAN}$ARCH${GRAY} -> ${CYAN}$TARGET_BIN${NC}"
 
 # Ensure curl is available
 if ! command -v curl >/dev/null 2>&1; then
-    echo -e "${AMBER}[!] curl not found, installing...${NC}"
+    echo -e "${PAD}${AMBER}[!] curl not found, installing...${NC}"
     if command -v pkg >/dev/null 2>&1; then
         pkg install -y curl
     elif command -v apt-get >/dev/null 2>&1; then
@@ -58,8 +76,8 @@ if [ -z "$REMOTE_VER" ]; then
     REMOTE_VER="latest"
 fi
 
-echo -e "${GREEN}[✓] Latest release: v$REMOTE_VER${NC}"
-echo -e "${GRAY}[*] Downloading precompiled binary...${NC}"
+echo -e "${PAD}${GREEN}[✓] Latest release: v$REMOTE_VER${NC}"
+echo -e "${PAD}${GRAY}[*] Downloading precompiled binary...${NC}"
 
 # Clean up old binary to ensure fresh download
 rm -f "$LOCAL_BIN"
@@ -69,7 +87,7 @@ DOWNLOAD_URL="$BASE_URL/$TARGET_BIN?t=$(date +%s)"
 curl -sL -H "Cache-Control: no-cache" "$DOWNLOAD_URL" -o "$LOCAL_BIN"
 
 if [ ! -s "$LOCAL_BIN" ]; then
-    echo -e "${RED}[✗] Failed to download binary from $BASE_URL/$TARGET_BIN${NC}"
+    echo -e "${PAD}${RED}[✗] Failed to download binary from $BASE_URL/$TARGET_BIN${NC}"
     exit 1
 fi
 
