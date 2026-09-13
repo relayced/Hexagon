@@ -4632,14 +4632,15 @@ func main() {
 }
 
 EOF
-# Always remove old binary and source before recompile
-# This prevents users from running a stale cached build with old bugs
-rm -f nefhub main.go.old
-if ! command -v go >/dev/null 2>&1; then
+# Always remove old binary before recompile to prevent stale cached builds
+rm -f nefhub
+if ! command -v go > /dev/null 2>&1; then
     echo "Installing required dependencies (first-time setup)..."
     pkg update -y && pkg install -y golang coreutils
 fi
-export GOROOT=$PREFIX/lib/go
+# Do NOT set GOROOT manually — Termux Go auto-detects its own root
+# Overriding it breaks the go tool with "unknown command" errors
+unset GOROOT
 export GO111MODULE=auto
 echo "Compiling Nefarious Hub..."
 go build -ldflags='-s -w' -o nefhub main.go
