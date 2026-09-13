@@ -4632,12 +4632,16 @@ func main() {
 }
 
 EOF
+# Always remove old binary and source before recompile
+# This prevents users from running a stale cached build with old bugs
+rm -f nefhub main.go.old
 if ! command -v go >/dev/null 2>&1; then
     echo "Installing required dependencies (first-time setup)..."
     pkg update -y && pkg install -y golang coreutils
 fi
 export GOROOT=$PREFIX/lib/go
 export GO111MODULE=auto
+echo "Compiling Nefarious Hub..."
 go build -ldflags='-s -w' -o nefhub main.go
 chmod +x nefhub
 if [ -e /dev/tty ]; then
