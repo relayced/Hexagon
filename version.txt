@@ -1,1 +1,20 @@
-1.4.2
+1.4.3
+
+[New Functions & Features]
++ Added clearTerminal() with scrollback wipe (\033[3J + clear) to fix step cards stacking on top
++ Added fetchLatestDeltaVersion() polling https://delta.filenetwork.vip/get_files.php
++ Added checkDeltaUpdate() with terminal alert, dashboard event & rich Discord webhook notifications
++ Added startDeltaUpdatePoller() 24/7 background watchdog checking Delta updates every 20m
++ Added sendSessionStartWebhook() automatic startup alert with full system telemetry
++ Added separated Script Devs (@NightWitch, @Eysdi) & Clone Credit (@Jep) across Banner & Pre-Flight
++ Added Discord Invite Link (discord.gg/6jg6PbWrz) to Banner and Session Pre-Flight cards
++ Added dual-engine webhook dispatch with Android Termux TLS support & native curl fallback
++ Added instant verification webhook when selecting saved webhook in Step 4
++ Added Discord alerts to kick signal and event log watchers
++ Upgraded box framing to cyber double-line aesthetic (╔═╗║╠═╣╚═╝) with vivid cyan accents
+
+[Removed Functions & Deprecated Features]
+- Removed su -c from clone intent launches to prevent Freeform windows minimizing into bubbles
+- Removed "Game Injection" terminology across all prompts, replaced with "Auto-Join"
+- Removed dead 404 banner assets (kameskill/autorejoin) causing Discord embed proxy drops
+- Removed raw partial ANSI \033[H\033[2J clears that caused terminal scrollback stacking

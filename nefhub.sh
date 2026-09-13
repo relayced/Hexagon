@@ -71,7 +71,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 # Fetch remote version
-REMOTE_VER=$(curl -sL "$VERSION_URL" 2>/dev/null | tr -d '[:space:]')
+REMOTE_VER=$(curl -sL "$VERSION_URL" 2>/dev/null | head -n 1 | tr -d '[:space:]')
 if [ -z "$REMOTE_VER" ]; then
     REMOTE_VER="latest"
 fi

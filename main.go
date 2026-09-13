@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	ScriptVersion = "1.4.2"
+	ScriptVersion = "1.4.3"
 	VersionURL    = "https://raw.githubusercontent.com/relayced/Hexagon/main/version.txt"
 	LogFileName   = "farming_log.txt"
 
@@ -1451,7 +1451,7 @@ func sendRichWebhook(eventType WebhookEventType, title, message string, color in
 		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(postData))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.2")
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.3")
 			resp, err := client.Do(req)
 			if err == nil && resp != nil {
 				defer resp.Body.Close()
@@ -1468,7 +1468,7 @@ func sendRichWebhook(eventType WebhookEventType, title, message string, color in
 		// 2. Fallback to Termux's native curl utility
 		cmd := exec.Command("curl", "-s", "-X", "POST",
 			"-H", "Content-Type: application/json",
-			"-H", "User-Agent: Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.2",
+			"-H", "User-Agent: Mozilla/5.0 (Linux; Android; Termux) NefariousHub/1.4.3",
 			"--data-binary", "@-",
 			targetURL,
 		)
