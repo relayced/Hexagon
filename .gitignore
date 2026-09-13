@@ -4,4 +4,9 @@
 # Only allow these files to be pushed
 !.gitignore
 !nefhub.sh
+!main.go
 !version.txt
+!nefhub_arm64
+!nefhub_arm
+!nefhub_amd64
+!CHANGELOGS.TXT

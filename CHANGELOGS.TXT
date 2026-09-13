@@ -1,0 +1,49 @@
+Nefarious Hub - v1.4.3 Patch Notes
+====================================
+
+**[New Features]**
++ Added Side-by-Side Floating Window Positioning — opens already-floating clone APKs cleanly without altering their natural displayed size, and positions them side-by-side (Clone 1 Left, Clone 2 Right).
++ Added Always-On-Top Floating Guard — background watchdog detects when Termux takes focus and immediately re-elevates the floating clones to the front so they stay visible over Termux.
++ Added CPU Core Calculation in Concurrency — balances both RAM and CPU cores so 4-core mobile CPUs are capped at 2 clones (even with 7GB+ RAM) to prevent 100% CPU lockups and thermal throttling.
++ Added Soft Keyboard Auto-Dismissal — automatically hides the on-screen soft keyboard via root keyevent 111 (`KEYCODE_ESCAPE`) and `ime hide` so Termux never pops open the keyboard over Android 10 Freeform windows.
++ Added Freeform Liveness Awareness — checks kernel procfs (`/proc/<pid>/stat`) and root process status so minimized/sleeping Freeform clones are recognized as healthy and never falsely treated as crashed.
++ Added Dedicated Version Verification UI — redesigned version check with a full card UI, semantic version comparison, and strict execution blocking (halts launch if running version is lower than required or expired).
+
+**[Improvements]**
++ Redesigned recovery coordinator with per-clone recovery state and 30-second post-recovery cooldown immunity.
++ Dashboard clone telemetry now uses sorted clone statuses so memory and PID entries always appear in clean numerical order (Clone 1 to N).
++ Eliminated duplicate intent pulses during launch and recovery that previously overloaded Roblox client activity managers.
++ Concurrency menu now displays live CPU cores and load percentage alongside RAM.
+
+**[Bug Fixes]**
++ Fixed clones not opening due to invalid `--bounds` flag in `am start` (replaced with clean standard intent launching).
++ Fixed keyboard popup bug on Android 10 that minimized Freeform clone windows after launch and recovery.
++ Fixed infinite recovery loop caused by minimized Freeform clones being falsely detected as crashed due to unmoving RAM.
++ Fixed recovery spam re-opening loop caused by logcat catching ActivityManager's own `Force stopping` and `am_kill` signals during process cleanup.
++ Fixed disconnect race conditions where simultaneous triggers from kick watchers, logcat, and in-game signals caused duplicate auto-load attempts, followed by crash reloads, followed by secondary auto-loads.
++ Fixed version verification continuing into setup even when the installed version was outdated.
+
+====================================
+Nefarious Hub - v1.4.2 Patch Notes
+====================================
+
+**[New Features]**
++ Added crash recovery queue — if multiple clones crash at once, they are now recovered one by one without missing any.
++ Added live RAM and PID display per clone on the dashboard (real-time, not estimated).
++ Added Private Server / VIP Share Link support — paste a Roblox private server link to auto-join with all clones.
++ Added custom game support — enter any Roblox game URL or Place ID to farm with your clones.
++ Added remote command support — send /rejoin, /restart, or /relaunch from your phone to control the hub.
++ Added kick signal detection — clones automatically rejoin when kicked or disconnected mid-session.
+
+**[Improvements]**
++ Crash recovery is now faster and more reliable — clones that crash are detected and reopened immediately.
++ Network outage handling improved — all clones automatically recover when your connection is restored.
++ Session launch is now smoother with better cooldown timing between clones.
++ Dashboard now shows Crash Queue status when multiple clones need recovery at the same time.
++ Discord webhook notifications now include live RAM usage, PID, and event timestamps.
++ Live Status on the dashboard now correctly transitions to Monitoring 24/7 after all clones are launched.
+
+**[Bug Fixes]**
++ Fixed clones being incorrectly force-closed and respawned when they were still running normally.
++ Fixed dashboard freezing and getting stuck on setup status after monitoring started.
++ Fixed crash detection sometimes missing or skipping one clone when two crashed simultaneously.
