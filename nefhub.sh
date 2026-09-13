@@ -61,17 +61,15 @@ fi
 echo -e "${GREEN}[✓] Latest release: v$REMOTE_VER${NC}"
 echo -e "${GRAY}[*] Downloading precompiled binary...${NC}"
 
-# Download precompiled binary
-DOWNLOAD_URL="$BASE_URL/$TARGET_BIN"
-HTTP_STATUS=$(curl -sL -w "%{http_code}" "$DOWNLOAD_URL" -o "$LOCAL_BIN")
+# Clean up old binary to ensure fresh download
+rm -f "$LOCAL_BIN"
 
-if [ ! -s "$LOCAL_BIN" ] || [ "$HTTP_STATUS" -ge 400 ]; then
-    echo -e "${AMBER}[!] Retrying download with cache-buster...${NC}"
-    curl -sL -H "Cache-Control: no-cache" "$DOWNLOAD_URL?t=$(date +%s)" -o "$LOCAL_BIN"
-fi
+# Download precompiled binary with cache-busting query
+DOWNLOAD_URL="$BASE_URL/$TARGET_BIN?t=$(date +%s)"
+curl -sL -H "Cache-Control: no-cache" "$DOWNLOAD_URL" -o "$LOCAL_BIN"
 
 if [ ! -s "$LOCAL_BIN" ]; then
-    echo -e "${RED}[✗] Failed to download binary from $DOWNLOAD_URL${NC}"
+    echo -e "${RED}[✗] Failed to download binary from $BASE_URL/$TARGET_BIN${NC}"
     exit 1
 fi
 
