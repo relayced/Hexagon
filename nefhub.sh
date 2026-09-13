@@ -4636,6 +4636,7 @@ if ! command -v go > /dev/null 2>&1; then
     echo "Installing required dependencies (first-time setup)..."
     pkg update -y && pkg install -y golang coreutils
 fi
+export GOROOT=$PREFIX/lib/go
 if [ -e /dev/tty ]; then
     go run main.go < /dev/tty
 else
