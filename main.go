@@ -1795,7 +1795,7 @@ func detectTerminalSize() (int, int) {
 	defer func() {
 		cachedTermMu.Lock()
 		if cachedTermW <= 0 {
-			cachedTermW = 44
+			cachedTermW = 46
 		}
 		if cachedTermH <= 0 {
 			cachedTermH = 24
@@ -1803,56 +1803,7 @@ func detectTerminalSize() (int, int) {
 		cachedTermMu.Unlock()
 	}()
 
-	// 1. Check environment variables COLUMNS and LINES
-	if cols, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && cols > 10 {
-		if lines, err2 := strconv.Atoi(os.Getenv("LINES")); err2 == nil && lines > 5 {
-			cachedTermMu.Lock()
-			cachedTermW, cachedTermH = cols, lines
-			cachedTermMu.Unlock()
-			return cols, lines
-		}
-	}
-
-	// 2. Try stty size with /dev/tty redirection (standard for Android Termux)
-	sttyCmds := []string{
-		"stty size < /dev/tty 2>/dev/null",
-		"stty size 2>/dev/null",
-		"/system/bin/stty size < /dev/tty 2>/dev/null",
-	}
-	for _, cmdStr := range sttyCmds {
-		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			parts := strings.Fields(string(out))
-			if len(parts) >= 2 {
-				h, errH := strconv.Atoi(parts[0])
-				w, errW := strconv.Atoi(parts[1])
-				if errH == nil && errW == nil && w > 10 && h > 5 {
-					return w, h
-				}
-			}
-		}
-	}
-
-	// 3. Try tput cols / tput lines with /dev/tty
-	tputCmds := []string{
-		"tput cols < /dev/tty 2>/dev/null",
-		"tput cols 2>/dev/null",
-	}
-	for _, cmdStr := range tputCmds {
-		if outW, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			if w, err := strconv.Atoi(strings.TrimSpace(string(outW))); err == nil && w > 10 {
-				h := 24
-				if outH, err := exec.Command("sh", "-c", "tput lines < /dev/tty 2>/dev/null").Output(); err == nil {
-					if hVal, err := strconv.Atoi(strings.TrimSpace(string(outH))); err == nil && hVal > 5 {
-						h = hVal
-					}
-				}
-				return w, h
-			}
-		}
-	}
-
-	// 4. Android Developer Options "Smallest Width" (dp) Detection via wm size & density
-	// Uses root / shell to read exact hardware display geometry and compute character capacity
+	// 1. Prioritize Android Developer Options "Smallest Width" (dp) Detection via wm size & density
 	var screenPxW int
 	wmSizeCmds := []string{
 		"wm size 2>/dev/null",
@@ -1863,8 +1814,24 @@ func detectTerminalSize() (int, int) {
 	}
 	for _, cmdStr := range wmSizeCmds {
 		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			reSize := regexp.MustCompile(`([0-9]+)x([0-9]+)`)
-			if m := reSize.FindStringSubmatch(string(out)); len(m) >= 3 {
+			outStr := string(out)
+			// Prefer Developer Options "Override size" if configured
+			reOverride := regexp.MustCompile(`Override size:\s*([0-9]+)x([0-9]+)`)
+			if m := reOverride.FindStringSubmatch(outStr); len(m) >= 3 {
+				w, _ := strconv.Atoi(m[1])
+				h, _ := strconv.Atoi(m[2])
+				if w > 0 && h > 0 {
+					if w < h {
+						screenPxW = w
+					} else {
+						screenPxW = h
+					}
+					break
+				}
+			}
+			// Fall back to Physical size
+			rePhysical := regexp.MustCompile(`(?:Physical size:|[0-9]+x)\s*([0-9]+)x([0-9]+)`)
+			if m := rePhysical.FindStringSubmatch(outStr); len(m) >= 3 {
 				w, _ := strconv.Atoi(m[1])
 				h, _ := strconv.Atoi(m[2])
 				if w > 0 && h > 0 {
@@ -1889,8 +1856,18 @@ func detectTerminalSize() (int, int) {
 	}
 	for _, cmdStr := range wmDenCmds {
 		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
-			reDen := regexp.MustCompile(`density:\s*([0-9]+)`)
-			if m := reDen.FindStringSubmatch(string(out)); len(m) > 1 {
+			outStr := string(out)
+			// Prefer Developer Options "Override density" if configured
+			reOverride := regexp.MustCompile(`Override density:\s*([0-9]+)`)
+			if m := reOverride.FindStringSubmatch(outStr); len(m) > 1 {
+				if d, err := strconv.Atoi(m[1]); err == nil && d > 0 {
+					density = d
+					break
+				}
+			}
+			// Fall back to Physical density
+			rePhysical := regexp.MustCompile(`(?:Physical density:|density:)\s*([0-9]+)`)
+			if m := rePhysical.FindStringSubmatch(outStr); len(m) > 1 {
 				if d, err := strconv.Atoi(m[1]); err == nil && d > 0 {
 					density = d
 					break
@@ -1904,12 +1881,48 @@ func detectTerminalSize() (int, int) {
 		swDp := (screenPxW * 160) / density
 		// Termux standard font consumes ~8.2 dp per character column
 		calcCols := int(float64(swDp) / 8.2)
-		if calcCols >= 36 && calcCols <= 80 {
+		if calcCols >= 36 && calcCols <= 120 {
+			cachedTermMu.Lock()
+			cachedTermW = calcCols
+			cachedTermH = 24
+			cachedTermMu.Unlock()
 			return calcCols, 24
 		}
 	}
 
-	// 5. Native Termux Portrait Baseline (46 columns, 24 rows)
+	// 2. Check environment variables COLUMNS and LINES
+	if cols, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && cols > 10 {
+		if lines, err2 := strconv.Atoi(os.Getenv("LINES")); err2 == nil && lines > 5 {
+			cachedTermMu.Lock()
+			cachedTermW, cachedTermH = cols, lines
+			cachedTermMu.Unlock()
+			return cols, lines
+		}
+	}
+
+	// 3. Try stty size
+	sttyCmds := []string{
+		"stty size < /dev/tty 2>/dev/null",
+		"stty size 2>/dev/null",
+		"/system/bin/stty size < /dev/tty 2>/dev/null",
+	}
+	for _, cmdStr := range sttyCmds {
+		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
+			parts := strings.Fields(string(out))
+			if len(parts) >= 2 {
+				h, errH := strconv.Atoi(parts[0])
+				w, errW := strconv.Atoi(parts[1])
+				if errH == nil && errW == nil && w > 10 && h > 5 {
+					cachedTermMu.Lock()
+					cachedTermW, cachedTermH = w, h
+					cachedTermMu.Unlock()
+					return w, h
+				}
+			}
+		}
+	}
+
+	// 4. Native Termux Baseline (46 columns, 24 rows)
 	return 46, 24
 }
 
