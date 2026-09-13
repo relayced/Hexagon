@@ -1,4 +1,5 @@
 #!/bin/bash
+# Nefarious Hub Termux Launcher v1.4.3
 set -e
 
 REPO="relayced/Hexagon"
