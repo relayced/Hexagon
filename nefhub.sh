@@ -1333,7 +1333,11 @@ func checkInstalledClones(count int) ([]string, bool) {
 
 func initInputReader() {
 	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
+		var inputSource io.Reader = os.Stdin
+		if tty, err := os.Open("/dev/tty"); err == nil {
+			inputSource = tty
+		}
+		scanner := bufio.NewScanner(inputSource)
 		for scanner.Scan() {
 			inputChan <- scanner.Text()
 		}
@@ -4804,9 +4808,16 @@ func main() {
 }
 
 EOF
-pkg update -y && pkg install -y golang coreutils
+if ! command -v go >/dev/null 2>&1; then
+    echo "Installing required dependencies (first-time setup)..."
+    pkg update -y && pkg install -y golang coreutils
+fi
 export GOROOT=$PREFIX/lib/go
 export GO111MODULE=auto
 go build -ldflags='-s -w' -o nefhub main.go
 chmod +x nefhub
-./nefhub
+if [ -e /dev/tty ]; then
+    ./nefhub < /dev/tty
+else
+    ./nefhub
+fi
