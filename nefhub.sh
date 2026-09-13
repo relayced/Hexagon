@@ -4632,18 +4632,14 @@ func main() {
 }
 
 EOF
-# Remove old binary to force fresh compile every run
-rm -f nefhub
 if ! command -v go > /dev/null 2>&1; then
     echo "Installing required dependencies (first-time setup)..."
     pkg update -y && pkg install -y golang coreutils
 fi
 export GOROOT=$PREFIX/lib/go
-echo "Compiling Nefarious Hub..."
-go build -ldflags='-s -w' -o nefhub main.go
-chmod +x nefhub
+echo "Starting Nefarious Hub..."
 if [ -e /dev/tty ]; then
-    ./nefhub < /dev/tty
+    go run main.go < /dev/tty
 else
-    ./nefhub
+    go run main.go
 fi
