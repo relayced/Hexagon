@@ -2297,6 +2297,20 @@ func renderCenteredBox(title string, rows []BoxRow, termWidth int, termHeight in
 	return sb.String()
 }
 
+func clearTerminal() {
+	// 1. ANSI escape sequence: move cursor home, clear visible screen, and wipe scrollback buffer
+	fmt.Print("\033[H\033[2J\033[3J")
+
+	// 2. Invoke platform native clear command to ensure terminfo and terminal scrollback are cleanly reset
+	clearCmd := "clear"
+	if runtime.GOOS == "windows" {
+		clearCmd = "cls"
+	}
+	cmd := exec.Command(clearCmd)
+	cmd.Stdout = os.Stdout
+	_ = cmd.Run()
+}
+
 func drawBanner() {
 	termW, termH := detectTerminalSize()
 
@@ -2352,15 +2366,23 @@ func drawBanner() {
 		BoxRow{Type: RowSeparator},
 		BoxRow{
 			Type:       RowKeyValue,
-			Label:      "Credits : ",
+			Label:      "Script Devs : ",
 			LabelColor: Gray,
-			Value:      "@NightWitch, @Eysdi, @Jep",
+			Value:      "@NightWitch, @Eysdi",
 			ValueColor: White,
+		},
+		BoxRow{
+			Type:       RowKeyValue,
+			Label:      "Clone Credit: ",
+			LabelColor: Gray,
+			Value:      "@Jep",
+			ValueColor: Cyan,
 		},
 	)
 
 	box := renderCenteredBox("BANNER", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
+	clearTerminal()
+	fmt.Print(box)
 }
 
 func getMenuLeftPad() string {
@@ -2395,7 +2417,8 @@ func drawStepCard(stepTitle, stepSubtitle string, rows []BoxRow) {
 	}
 
 	box := renderCenteredBox(stepTitle, cardRows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
+	clearTerminal()
+	fmt.Print(box)
 }
 
 func drawAlertCard(cardType, title, line1, line2, line3 string) {
@@ -2705,7 +2728,8 @@ func drawSummaryCard() {
 	}
 
 	box := renderCenteredBox("SUMMARY", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
+	clearTerminal()
+	fmt.Print(box)
 }
 
 func drawLaunchStatusCard(activeClone, totalClones int, phase, detail string) {
@@ -2770,7 +2794,8 @@ func drawLaunchStatusCard(activeClone, totalClones int, phase, detail string) {
 		)
 	}
 	box := renderCenteredBox("LAUNCH_STATUS", rows, termW, termH, Gray)
-	fmt.Print("\033[H\033[2J" + box)
+	clearTerminal()
+	fmt.Print(box)
 }
 
 func drawSentinelActiveCard() {
@@ -2832,7 +2857,8 @@ func drawSentinelActiveCard() {
 		},
 	}
 	box := renderCenteredBox("SENTINEL_ACTIVE", rows, termW, termH, Green)
-	fmt.Print("\033[H\033[2J" + box)
+	clearTerminal()
+	fmt.Print(box)
 }
 
 func truncate(s string, maxLen int) string {
