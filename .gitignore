@@ -1,0 +1,7 @@
+# Ignore everything by default
+*
+
+# Only allow these files to be pushed
+!.gitignore
+!nefhub.sh
+!version.txt
