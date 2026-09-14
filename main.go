@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"bufio"
@@ -3496,23 +3496,43 @@ func configureConcurrency() {
 }
 
 // pickOneGame presents the standard game picker and returns a filled CloneGameConfig.
+// If initialChoice is provided (e.g. "1", "2", "3"), it skips the selection card and enters that flow directly.
 // Returns ok=false if the user chose 'back' from a sub-menu.
-func pickOneGame(title string) (cfg CloneGameConfig, ok bool) {
+func pickOneGame(title string, initialChoice ...string) (cfg CloneGameConfig, ok bool) {
 	pad := getMenuLeftPad()
+	firstRun := true
+	var preChoice string
+	if len(initialChoice) > 0 {
+		preChoice = strings.TrimSpace(initialChoice[0])
+	}
+
 	for {
-		rows := []BoxRow{
-			{Type: RowSubtitle, CustomText: "Select the game to farm in.", CustomColor: White},
-			{Type: RowSubtitle, CustomText: "Sentinel will keep the account connected 24/7.", CustomColor: Dim},
-			BoxRow{Type: RowSeparator},
-			{Type: RowKeyValue, Label: "[1] Steal An Egg ", LabelColor: Green, Value: "Public Server (Default)", ValueColor: Green},
-			{Type: RowKeyValue, Label: "[2] Custom Game  ", LabelColor: White, Value: "Paste Game Link / Place ID", ValueColor: Dim},
-			{Type: RowKeyValue, Label: "[3] Private VIP  ", LabelColor: White, Value: "Private Server Share Link", ValueColor: Dim},
-			BoxRow{Type: RowSeparator},
-			{Type: RowSubtitle, CustomText: "Tip: Press [ENTER] to farm Steal An Egg (Default)", CustomColor: Green},
+		choice := ""
+		if firstRun && preChoice != "" {
+			choice = preChoice
+			firstRun = false
+		} else {
+			firstRun = false
+			drainInput()
+			rows := []BoxRow{
+				{Type: RowSubtitle, CustomText: "Select the game to farm in.", CustomColor: White},
+				{Type: RowSubtitle, CustomText: "Sentinel will keep the account connected 24/7.", CustomColor: Dim},
+				BoxRow{Type: RowSeparator},
+				{Type: RowKeyValue, Label: "[1] Steal An Egg ", LabelColor: Green, Value: "Public Server (Default)", ValueColor: Green},
+				{Type: RowKeyValue, Label: "[2] Custom Game  ", LabelColor: White, Value: "Paste Game Link / Place ID", ValueColor: Dim},
+				{Type: RowKeyValue, Label: "[3] Private VIP  ", LabelColor: White, Value: "Private Server Share Link", ValueColor: Dim},
+				BoxRow{Type: RowSeparator},
+				{Type: RowSubtitle, CustomText: "Tip: [ENTER] = Steal An Egg | type 'back' to go back", CustomColor: Green},
+			}
+			drawStepCard(title, "Roblox Auto-Join & Farm Target", rows)
+			fmt.Printf("%s> Selection [1-3] ('back' to cancel): %s", pad+White, NC)
+			choice = strings.TrimSpace(readLine())
+
+			// Allow cancelling back to the parent menu (e.g. from Mixed mode clone loop)
+			if strings.ToLower(choice) == "back" {
+				return CloneGameConfig{}, false
+			}
 		}
-		drawStepCard(title, "Roblox Auto-Join & Farm Target", rows)
-		fmt.Printf("%s> Selection [1-3] (default: 1): %s", pad+White, NC)
-		choice := strings.TrimSpace(readLine())
 
 		switch {
 		case choice == "" || choice == "1":
@@ -3670,7 +3690,7 @@ func configureTargetExperience() {
 			configs := make([]CloneGameConfig, 0, cloneCount)
 			cancelled := false
 			for i := 0; i < cloneCount; i++ {
-				cloneLabel := fmt.Sprintf("2. TARGET â€” CLONE %d of %d", i+1, cloneCount)
+				cloneLabel := fmt.Sprintf("2. GAME - CLONE %d of %d", i+1, cloneCount)
 				cfg, ok := pickOneGame(cloneLabel)
 				if !ok {
 					cancelled = true
@@ -3693,11 +3713,13 @@ func configureTargetExperience() {
 			time.Sleep(1500 * time.Millisecond)
 			continue
 		}
-		// Re-enter the outer loop by temporarily routing to pickOneGame.
-		// We set a fake selection by storing choice in a local so pickOneGame
-		// can start at the right branch. Since pickOneGame always shows its
-		// own menu, we just call it directly and accept the first answer.
-		cfg, _ := pickOneGame("2. TARGET EXPERIENCE")
+		if choice == "" {
+			choice = "1"
+		}
+		cfg, ok := pickOneGame("2. TARGET EXPERIENCE", choice)
+		if !ok {
+			continue
+		}
 		cloneGameConfigs = make([]CloneGameConfig, cloneCount)
 		for i := range cloneGameConfigs {
 			cloneGameConfigs[i] = cfg
@@ -3974,8 +3996,8 @@ func launchInitialInstances() {
 
 		runAnimatedCountdown(fmt.Sprintf("Warming engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
 
-		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", "Connecting to game experience...")
 		cloneGame := getCloneGameConfig(pkg)
+		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", fmt.Sprintf("Connecting to %s...", cloneGame.Name))
 		var outJoin []byte
 		var errJoin error
 		if checkRoot() {

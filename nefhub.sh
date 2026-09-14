@@ -2,7 +2,7 @@
 # Nefarious Hub Termux Launcher v1.4.3
 set -e
 
-REPO="relayced/Hexagon"
+REPO="${NEF_REPO:-relayced/test-nef}"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/$REPO/$BRANCH"
 VERSION_URL="$BASE_URL/version.txt"
