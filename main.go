@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bufio"
@@ -80,11 +80,16 @@ var (
 	gameName        string
 	gameURL         string
 	cloneCount      int
-	enableRejoin   bool
-	activePackages []string
+	enableRejoin    bool
+	activePackages  []string
 
 	serverPlaceID  string
 	serverGameName string
+
+	// Per-clone game assignment — populated by configureTargetExperience.
+	// Index i corresponds to activePackages[i]. Replaces global gameURL/gameName
+	// at all launch and recovery call sites when Mixed mode is active.
+	cloneGameConfigs []CloneGameConfig
 
 	inputChan = make(chan string, 16)
 
@@ -108,6 +113,24 @@ var (
 	recentlyLaunchedPkg string
 	recentlyLaunchedMu  sync.Mutex
 )
+
+// CloneGameConfig holds the Roblox deep-link URL and display name for a single clone.
+type CloneGameConfig struct {
+	URL  string
+	Name string
+}
+
+// getCloneGameConfig returns the game config assigned to a package.
+// Falls back to the global gameName/gameURL for backward compatibility when
+// cloneGameConfigs has not been populated (single-game mode).
+func getCloneGameConfig(pkg string) CloneGameConfig {
+	for i, p := range activePackages {
+		if p == pkg && i < len(cloneGameConfigs) {
+			return cloneGameConfigs[i]
+		}
+	}
+	return CloneGameConfig{URL: gameURL, Name: gameName}
+}
 
 // State helpers to prevent spam reopening and duplicate crash/disconnect triggers
 func isCloneRecoveringOrCooldown(pkg string) bool {
@@ -157,9 +180,13 @@ func markCloneLaunched(pkg string) {
 	cloneHealthMu.Unlock()
 }
 
-// hideSoftKeyboard safely ensures keyboard does not disrupt windows without sending intrusive keyevents to running games.
+// hideSoftKeyboard dismisses the Android soft keyboard via the input_method system service.
+// This uses a pure service-level call (no keyevent dispatched) so it cannot trigger
+// Roblox's in-game escape/leave modal or any other app-level key handler.
 func hideSoftKeyboard() {
-	// Intentionally omitted keyevent 111 (ESCAPE) to avoid triggering Roblox in-game exit/leave modal
+	// 'cmd input_method hide_soft_input' talks directly to InputMethodManagerService
+	// and hides the IME without sending KEYCODE_BACK or KEYCODE_ESCAPE to any window.
+	_ = exec.Command("cmd", "input_method", "hide_soft_input").Run()
 }
 
 // isProcessAlive checks whether the process PID exists in kernel procfs and is not a zombie.
@@ -1126,7 +1153,8 @@ func getCloneMemoryUsage(pkg, game string) CloneResourceReport {
 func getSortedCloneStatuses() []CloneResourceReport {
 	var reports []CloneResourceReport
 	for _, pkg := range activePackages {
-		reports = append(reports, getCloneMemoryUsage(pkg, gameName))
+		cfg := getCloneGameConfig(pkg)
+		reports = append(reports, getCloneMemoryUsage(pkg, cfg.Name))
 	}
 	return reports
 }
@@ -1592,7 +1620,7 @@ func sendSessionStartWebhook() {
 	}
 	res := getSystemResources()
 	fields := []DiscordEmbedField{
-		{Name: "🎮 Target Experience", Value: fmt.Sprintf("`%s`", gameName), Inline: true},
+		{Name: "🎮 Target Experience", Value: func() string { if len(cloneGameConfigs) > 1 { var names []string; for _, c := range cloneGameConfigs { names = append(names, c.Name) }; unique := map[string]bool{}; var uniq []string; for _, n := range names { if !unique[n] { unique[n] = true; uniq = append(uniq, n) } }; if len(uniq) > 1 { return "`Mixed: " + strings.Join(uniq, " / ") + "`" } }; return fmt.Sprintf("`%s`", gameName) }(), Inline: true},
 		{Name: "📱 Active Instances", Value: fmt.Sprintf("`%d Clone%s Online`", cloneCount, plural(cloneCount)), Inline: true},
 		{Name: "🛡️ Sentinel Guard", Value: "`ACTIVE (24/7 Watchdog)`", Inline: true},
 		{Name: "💾 System Memory", Value: fmt.Sprintf("%.1f / %.1f GB (%.0f%% Used)", res.UsedRAMGB, res.TotalRAMGB, res.RAMUsagePercent), Inline: false},
@@ -1600,7 +1628,7 @@ func sendSessionStartWebhook() {
 		{Name: "🕒 Started At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
 	}
 	sendRichWebhook(EventGeneral, "🚀 Nefarious Hub — Session Started",
-		fmt.Sprintf("All **%d Roblox instances** are running and synchronized with **%s**.", cloneCount, gameName),
+		func() string { isMix := false; if len(cloneGameConfigs) > 1 { for i := 1; i < len(cloneGameConfigs); i++ { if cloneGameConfigs[i].Name != cloneGameConfigs[0].Name { isMix = true; break } } }; if isMix { var names []string; for i, c := range cloneGameConfigs { names = append(names, fmt.Sprintf("Clone %d → %s", i+1, c.Name)) }; return fmt.Sprintf("**%d Roblox instances** started in Mixed Mode:\\n%s", cloneCount, strings.Join(names, "\\n")) }; return fmt.Sprintf("All **%d Roblox instances** are running and synchronized with **%s**.", cloneCount, gameName) }(),
 		3066993, fields)
 }
 
@@ -1660,7 +1688,7 @@ func startResourceMonitor() {
 			{Name: "⚡ CPU Load", Value: fmt.Sprintf("%.1f%% (%d Cores)", res.CPUUsagePercent, res.CPUCores), Inline: true},
 			{Name: "🛡️ Sentinel Status", Value: fmt.Sprintf("%d Clones Active", len(activePackages)), Inline: true},
 			{Name: "📱 Monitored Instances", Value: cloneSummary, Inline: false},
-			{Name: "🎮 Target Experience", Value: fmt.Sprintf("`%s`", truncate(gameName, 28)), Inline: true},
+			{Name: "🎮 Target Experience", Value: fmt.Sprintf("`%s`", truncate(gameName, 28)), Inline: true}, // gameName = first/only game
 			{Name: "🕒 Report Time", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
 		}
 
@@ -2622,29 +2650,69 @@ func drawSummaryCard() {
 			CustomColor: Bold + White,
 		},
 		{Type: RowSeparator},
-		{
+	}
+
+	// Detect mixed mode: check if clones have different games assigned
+	isMixed := false
+	if len(cloneGameConfigs) > 1 {
+		for i := 1; i < len(cloneGameConfigs); i++ {
+			if cloneGameConfigs[i].Name != cloneGameConfigs[0].Name {
+				isMixed = true
+				break
+			}
+		}
+	}
+
+	if isMixed {
+		rows = append(rows, BoxRow{
 			Type:       RowKeyValue,
 			Label:      "Experience: ",
 			LabelColor: Gray,
-			Value:      gameName,
+			Value:      fmt.Sprintf("Mixed (%d Games)", len(cloneGameConfigs)),
+			ValueColor: Amber,
+		})
+		for i, cfg := range cloneGameConfigs {
+			cloneLabel := fmt.Sprintf("  Clone %-2d : ", i+1)
+			expType := "Public"
+			if strings.Contains(cfg.URL, "share?") || strings.Contains(cfg.URL, "privateServer") || strings.Contains(cfg.Name, "[VIP]") {
+				expType = "VIP"
+			}
+			rows = append(rows, BoxRow{
+				Type:       RowKeyValue,
+				Label:      cloneLabel,
+				LabelColor: Dim,
+				Value:      fmt.Sprintf("%s [%s]", cfg.Name, expType),
+				ValueColor: White,
+			})
+		}
+	} else {
+		displayExpName := gameName
+		displayExpURL := gameURL
+		if len(cloneGameConfigs) > 0 {
+			displayExpName = cloneGameConfigs[0].Name
+			displayExpURL = cloneGameConfigs[0].URL
+		}
+		rows = append(rows, BoxRow{
+			Type:       RowKeyValue,
+			Label:      "Experience: ",
+			LabelColor: Gray,
+			Value:      displayExpName,
 			ValueColor: White,
-		},
+		})
+		expType := "Public Server"
+		typeColor := White
+		if strings.Contains(displayExpURL, "share?") || strings.Contains(displayExpURL, "privateServer") || strings.Contains(displayExpName, "[VIP]") {
+			expType = "Private Server (VIP)"
+			typeColor = Green
+		}
+		rows = append(rows, BoxRow{
+			Type:       RowKeyValue,
+			Label:      "Type      : ",
+			LabelColor: Gray,
+			Value:      expType,
+			ValueColor: typeColor,
+		})
 	}
-
-	expType := "Public Server"
-	typeColor := White
-	if strings.Contains(gameURL, "share?") || strings.Contains(gameURL, "privateServer") || strings.Contains(gameName, "[VIP]") {
-		expType = "Private Server (VIP)"
-		typeColor = Green
-	}
-	rows = append(rows, BoxRow{
-		Type:       RowKeyValue,
-		Label:      "Type      : ",
-		LabelColor: Gray,
-		Value:      expType,
-		ValueColor: typeColor,
-	})
-
 	rows = append(rows, BoxRow{
 		Type:       RowKeyValue,
 		Label:      "Instances : ",
@@ -3319,21 +3387,22 @@ func configureConcurrency() {
 			} else if i < rec {
 				note = "Safe & Lightweight"
 				color = Dim
-			} else if res.CPUCores <= 4 && i > 2 {
-				note = fmt.Sprintf("High CPU Overload (Capped by %d Cores)", res.CPUCores)
-				color = Amber
-				if i >= 4 {
-					color = Red
-				}
 			} else if i-rec == 1 {
 				note = "Moderate Hardware Pressure"
 				color = Amber
 			} else if i-rec == 2 {
 				note = "High Risk of Crash / OOM"
 				color = Amber
+				if res.CPUCores <= 4 && i > 2 {
+					note = fmt.Sprintf("High CPU Overload (Capped by %d Cores)", res.CPUCores)
+					color = Red
+				}
 			} else {
 				note = "Extreme CPU & RAM Pressure"
 				color = Red
+				if res.CPUCores <= 4 && i > 2 {
+					note = fmt.Sprintf("High CPU Overload (Capped by %d Cores)", res.CPUCores)
+				}
 			}
 			rows = append(rows, BoxRow{
 				Type:       RowKeyValue,
@@ -3426,69 +3495,38 @@ func configureConcurrency() {
 	}
 }
 
-func configureTargetExperience() {
+// pickOneGame presents the standard game picker and returns a filled CloneGameConfig.
+// Returns ok=false if the user chose 'back' from a sub-menu.
+func pickOneGame(title string) (cfg CloneGameConfig, ok bool) {
+	pad := getMenuLeftPad()
 	for {
-		pad := getMenuLeftPad()
 		rows := []BoxRow{
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Select the game your clones will farm in.",
-				CustomColor: White,
-			},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Sentinel will keep accounts connected 24/7.",
-				CustomColor: Dim,
-			},
+			{Type: RowSubtitle, CustomText: "Select the game to farm in.", CustomColor: White},
+			{Type: RowSubtitle, CustomText: "Sentinel will keep the account connected 24/7.", CustomColor: Dim},
 			BoxRow{Type: RowSeparator},
-			{
-				Type:       RowKeyValue,
-				Label:      "[1] Steal An Egg ",
-				LabelColor: Green,
-				Value:      "Public Server (Default)",
-				ValueColor: Green,
-			},
-			{
-				Type:       RowKeyValue,
-				Label:      "[2] Custom Game  ",
-				LabelColor: White,
-				Value:      "Paste Game Link / Place ID",
-				ValueColor: Dim,
-			},
-			{
-				Type:       RowKeyValue,
-				Label:      "[3] Private VIP  ",
-				LabelColor: White,
-				Value:      "Private Server Share Link",
-				ValueColor: Dim,
-			},
+			{Type: RowKeyValue, Label: "[1] Steal An Egg ", LabelColor: Green, Value: "Public Server (Default)", ValueColor: Green},
+			{Type: RowKeyValue, Label: "[2] Custom Game  ", LabelColor: White, Value: "Paste Game Link / Place ID", ValueColor: Dim},
+			{Type: RowKeyValue, Label: "[3] Private VIP  ", LabelColor: White, Value: "Private Server Share Link", ValueColor: Dim},
 			BoxRow{Type: RowSeparator},
-			{
-				Type:        RowSubtitle,
-				CustomText:  "Tip: Press [ENTER] to farm Steal An Egg (Default)",
-				CustomColor: Green,
-			},
+			{Type: RowSubtitle, CustomText: "Tip: Press [ENTER] to farm Steal An Egg (Default)", CustomColor: Green},
 		}
-		drawStepCard("2. TARGET EXPERIENCE", "Roblox Auto-Join & Farm Target", rows)
-
-		fmt.Printf("%s› Selection [1-3] (default: 1): %s", pad+White, NC)
-
+		drawStepCard(title, "Roblox Auto-Join & Farm Target", rows)
+		fmt.Printf("%s> Selection [1-3] (default: 1): %s", pad+White, NC)
 		choice := strings.TrimSpace(readLine())
 
-		if choice == "" || choice == "1" {
-			targetPlaceID := serverPlaceID
-			if targetPlaceID == "" {
-				targetPlaceID = "107778070777162"
+		switch {
+		case choice == "" || choice == "1":
+			pid := serverPlaceID
+			if pid == "" {
+				pid = "107778070777162"
 			}
-			targetName := serverGameName
-			if targetName == "" {
-				targetName = "Steal An Egg"
+			name := serverGameName
+			if name == "" {
+				name = "Steal An Egg"
 			}
-			gameURL = "roblox://placeId=" + targetPlaceID
-			gameName = targetName
-			break
-		} else if choice == "2" {
-			goBack := false
+			return CloneGameConfig{URL: "roblox://placeId=" + pid, Name: name}, true
+
+		case choice == "2":
 			for {
 				drawStepCard("CUSTOM EXPERIENCE", "Enter Place ID or Game URL", []BoxRow{
 					{Type: RowSubtitle, CustomText: "Paste your Roblox game URL or Place ID.", CustomColor: White},
@@ -3496,15 +3534,11 @@ func configureTargetExperience() {
 					{Type: RowSeparator},
 					{Type: RowSubtitle, CustomText: "Type 'back' to return to menu.", CustomColor: Cyan},
 				})
-				fmt.Printf("%s› URL / Place ID: %s", pad+White, NC)
-
+				fmt.Printf("%s> URL / Place ID: %s", pad+White, NC)
 				link := strings.TrimSpace(readLine())
-
 				if strings.ToLower(link) == "back" {
-					goBack = true
 					break
 				}
-
 				customID := ""
 				rePlace := regexp.MustCompile(`[?&]placeId=([0-9]+)`)
 				if m := rePlace.FindStringSubmatch(link); len(m) > 1 {
@@ -3519,13 +3553,11 @@ func configureTargetExperience() {
 				if customID == "" && regexp.MustCompile(`^[0-9]+$`).MatchString(link) {
 					customID = link
 				}
-
 				if customID == "" {
 					drawAlertCard("ERROR", "[!] INVALID GAME ID", "Could not detect Place ID.", "Enter a valid game URL or numeric ID.", "")
 					time.Sleep(1500 * time.Millisecond)
 					continue
 				}
-
 				cName := ""
 				reName := regexp.MustCompile(`/games/[0-9]+/([^/?]*)`)
 				if m := reName.FindStringSubmatch(link); len(m) > 1 && m[1] != "" {
@@ -3539,7 +3571,6 @@ func configureTargetExperience() {
 					}
 					cName = strings.Join(words, " ")
 				}
-
 				if cName == "" {
 					drawStepCard("EXPERIENCE NAME", "Display Name for Dashboard", []BoxRow{
 						{Type: RowSubtitle, CustomText: "Enter a friendly name for this game.", CustomColor: White},
@@ -3547,7 +3578,7 @@ func configureTargetExperience() {
 						{Type: RowSeparator},
 						{Type: RowSubtitle, CustomText: "Press [ENTER] for default naming.", CustomColor: Cyan},
 					})
-					fmt.Printf("%s› Game Name: %s", pad+White, NC)
+					fmt.Printf("%s> Game Name: %s", pad+White, NC)
 					nameInput := strings.TrimSpace(readLine())
 					if nameInput != "" {
 						cName = nameInput
@@ -3555,16 +3586,10 @@ func configureTargetExperience() {
 						cName = "Custom Experience (" + customID + ")"
 					}
 				}
+				return CloneGameConfig{URL: "roblox://placeId=" + customID, Name: cName}, true
+			}
 
-				gameURL = "roblox://placeId=" + customID
-				gameName = cName
-				break
-			}
-			if !goBack {
-				break
-			}
-		} else if choice == "3" {
-			goBack := false
+		case choice == "3":
 			for {
 				drawStepCard("PRIVATE VIP SERVER", "Private Server Share Link", []BoxRow{
 					{Type: RowSubtitle, CustomText: "Paste your private server share link.", CustomColor: White},
@@ -3572,26 +3597,21 @@ func configureTargetExperience() {
 					{Type: RowSeparator},
 					{Type: RowSubtitle, CustomText: "Type 'back' to return to menu.", CustomColor: Cyan},
 				})
-				fmt.Printf("%s› Private Server URL: %s", pad+White, NC)
-
+				fmt.Printf("%s> Private Server URL: %s", pad+White, NC)
 				link := strings.TrimSpace(readLine())
-
 				if strings.ToLower(link) == "back" {
-					goBack = true
 					break
 				}
-
 				if !strings.Contains(link, "roblox.com") && !strings.Contains(link, "roblox://") {
 					drawAlertCard("ERROR", "[!] INVALID VIP LINK", "Must be a valid Roblox share link.", "", "")
 					time.Sleep(1500 * time.Millisecond)
 					continue
 				}
-
 				drawStepCard("VIP SERVER NAME", "Display Name for Dashboard", []BoxRow{
 					{Type: RowSubtitle, CustomText: "Enter a display name for this VIP server.", CustomColor: White},
 					{Type: RowSubtitle, CustomText: "Example: Steal An Egg [VIP]", CustomColor: Dim},
 				})
-				fmt.Printf("%s› VIP Server Name: %s", pad+White, NC)
+				fmt.Printf("%s> VIP Server Name: %s", pad+White, NC)
 				nameInput := strings.TrimSpace(readLine())
 				if nameInput == "" {
 					nameInput = "Private Server Experience"
@@ -3599,18 +3619,92 @@ func configureTargetExperience() {
 				if !strings.Contains(nameInput, "[VIP]") {
 					nameInput += " [VIP]"
 				}
+				return CloneGameConfig{URL: link, Name: nameInput}, true
+			}
 
-				gameURL = link
-				gameName = nameInput
-				break
-			}
-			if !goBack {
-				break
-			}
-		} else {
+		default:
 			drawAlertCard("ERROR", "[!] INVALID CHOICE", "Please enter 1, 2, or 3.", "", "")
 			time.Sleep(1500 * time.Millisecond)
 		}
+	}
+}
+
+func configureTargetExperience() {
+	pad := getMenuLeftPad()
+	for {
+		rows := []BoxRow{
+			{Type: RowSubtitle, CustomText: "Select the game your clones will farm in.", CustomColor: White},
+			{Type: RowSubtitle, CustomText: "Sentinel will keep accounts connected 24/7.", CustomColor: Dim},
+			BoxRow{Type: RowSeparator},
+			{Type: RowKeyValue, Label: "[1] Steal An Egg ", LabelColor: Green, Value: "Public Server (Default)", ValueColor: Green},
+			{Type: RowKeyValue, Label: "[2] Custom Game  ", LabelColor: White, Value: "Paste Game Link / Place ID", ValueColor: Dim},
+			{Type: RowKeyValue, Label: "[3] Private VIP  ", LabelColor: White, Value: "Private Server Share Link", ValueColor: Dim},
+		}
+		if cloneCount > 1 {
+			rows = append(rows, BoxRow{
+				Type: RowKeyValue, Label: "[4] Mixed Mode  ", LabelColor: Amber,
+				Value: fmt.Sprintf("Assign a different game to each of your %d clones", cloneCount), ValueColor: Amber,
+			})
+		}
+		tip := "Tip: Press [ENTER] to farm Steal An Egg (Default)"
+		if cloneCount > 1 {
+			tip = "Tip: Use [4] Mixed Mode to run different games across clones"
+		}
+		rows = append(rows, BoxRow{Type: RowSeparator}, BoxRow{Type: RowSubtitle, CustomText: tip, CustomColor: Green})
+		drawStepCard("2. TARGET EXPERIENCE", "Roblox Auto-Join & Farm Target", rows)
+
+		prompt := "> Selection [1-3] (default: 1): "
+		if cloneCount > 1 {
+			prompt = "> Selection [1-4] (default: 1): "
+		}
+		fmt.Printf("%s%s%s", pad+White, prompt, NC)
+		choice := strings.TrimSpace(readLine())
+
+		// [4] MIXED MODE - assign a different game to each clone
+		if choice == "4" {
+			if cloneCount <= 1 {
+				drawAlertCard("ERROR", "[!] MIXED MODE UNAVAILABLE", "Mixed mode requires 2 or more clones.", "", "")
+				time.Sleep(1500 * time.Millisecond)
+				continue
+			}
+			configs := make([]CloneGameConfig, 0, cloneCount)
+			cancelled := false
+			for i := 0; i < cloneCount; i++ {
+				cloneLabel := fmt.Sprintf("2. TARGET â€” CLONE %d of %d", i+1, cloneCount)
+				cfg, ok := pickOneGame(cloneLabel)
+				if !ok {
+					cancelled = true
+					break
+				}
+				configs = append(configs, cfg)
+			}
+			if cancelled {
+				continue
+			}
+			cloneGameConfigs = configs
+			gameURL = configs[0].URL
+			gameName = configs[0].Name
+			break
+		}
+
+		// Single-game paths (1 / 2 / 3 / blank) - delegate to pickOneGame
+		if choice != "" && choice != "1" && choice != "2" && choice != "3" {
+			drawAlertCard("ERROR", "[!] INVALID CHOICE", fmt.Sprintf("Please enter a number between 1 and %d.", map[bool]int{true: 4, false: 3}[cloneCount > 1]), "", "")
+			time.Sleep(1500 * time.Millisecond)
+			continue
+		}
+		// Re-enter the outer loop by temporarily routing to pickOneGame.
+		// We set a fake selection by storing choice in a local so pickOneGame
+		// can start at the right branch. Since pickOneGame always shows its
+		// own menu, we just call it directly and accept the first answer.
+		cfg, _ := pickOneGame("2. TARGET EXPERIENCE")
+		cloneGameConfigs = make([]CloneGameConfig, cloneCount)
+		for i := range cloneGameConfigs {
+			cloneGameConfigs[i] = cfg
+		}
+		gameURL = cfg.URL
+		gameName = cfg.Name
+		break
 	}
 }
 
@@ -3873,21 +3967,28 @@ func launchInitialInstances() {
 		if errLaunch != nil || strings.Contains(string(outLaunch), "Error") {
 			safeLog("  %s[LAUNCH LOG]%s %s: %s", Amber, NC, displayName, strings.TrimSpace(string(outLaunch)))
 		}
+		// Give the activity window time to gain focus before dismissing IME,
+		// since Android raises the keyboard asynchronously after the transition.
+		time.Sleep(600 * time.Millisecond)
+		hideSoftKeyboard()
 
 		runAnimatedCountdown(fmt.Sprintf("Warming engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
 
 		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", "Connecting to game experience...")
+		cloneGame := getCloneGameConfig(pkg)
 		var outJoin []byte
 		var errJoin error
 		if checkRoot() {
-			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
+			cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", cloneGame.URL, pkg)
 			outJoin, errJoin = exec.Command("su", "-c", cmdStr).CombinedOutput()
 		} else {
-			outJoin, errJoin = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).CombinedOutput()
+			outJoin, errJoin = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", cloneGame.URL, "-p", pkg).CombinedOutput()
 		}
 		if errJoin != nil || strings.Contains(string(outJoin), "Error") {
 			safeLog("  %s[JOIN LOG]%s %s: %s", Amber, NC, displayName, strings.TrimSpace(string(outJoin)))
 		}
+		time.Sleep(600 * time.Millisecond)
+		hideSoftKeyboard()
 
 		if i < cloneCount-1 {
 			drawLaunchStatusCard(i+1, cloneCount, "Stabilizing Memory", "Cooling down before launching next clone...")
@@ -4069,7 +4170,8 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 
 	// Refresh live system resources
 	res := getSystemResources()
-	cloneMem := getCloneMemoryUsage(pkg, gameName)
+	cloneGame := getCloneGameConfig(pkg)
+	cloneMem := getCloneMemoryUsage(pkg, cloneGame.Name)
 
 	ramDesc := fmt.Sprintf("~%d MB (%s)", cloneMem.RAMMB, cloneMem.GameProfile)
 	if !cloneMem.IsEstimated && cloneMem.PID > 0 {
@@ -4080,7 +4182,7 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 		setDashboardEvent("Recovering: "+displayName, Amber, "ANR", displayName+" Unresponsive", ramDesc, eventTime)
 		safeLog("[%s] %s[ANR]%s      %s%s%s unresponsive (freeze). Rebooting...", eventTime, Amber, NC, White, displayName, NC)
 		writeLog("ANR", fmt.Sprintf("%s unresponsive", displayName))
-		sendFreezeWebhook(displayName, pkg, gameName, res, cloneMem, logTimestamp)
+		sendFreezeWebhook(displayName, pkg, cloneGame.Name, res, cloneMem, logTimestamp)
 	} else {
 		setDashboardEvent("Recovering: "+displayName, Red, "CRASH", displayName+" Terminated", ramDesc, eventTime)
 		if !cloneMem.IsEstimated && cloneMem.PID > 0 {
@@ -4089,7 +4191,7 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 			safeLog("[%s] %s[CRASH]%s    %s%s%s process terminated. Recovering...", eventTime, Red, NC, White, displayName, NC)
 		}
 		writeLog("CRASH", fmt.Sprintf("%s terminated", displayName))
-		sendCrashWebhook(displayName, pkg, gameName, res, cloneMem, logTimestamp)
+		sendCrashWebhook(displayName, pkg, cloneGame.Name, res, cloneMem, logTimestamp)
 	}
 
 	// Live Resource display on console
@@ -4121,22 +4223,26 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 	// 2. Launch client engine
 	markCloneLaunched(pkg)
 	_ = exec.Command("am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", pkg).Run()
+	time.Sleep(600 * time.Millisecond)
+	hideSoftKeyboard()
 
 	// 3. Full 10-second client engine initialization animated countdown
 	runAnimatedCountdown(fmt.Sprintf("Initializing client engine (%s)...", displayName), 10, "READY", fmt.Sprintf("Client engine initialized (%s)", displayName))
 
 	// 4. Game connection intent
 	joinTime := time.Now().Format("15:04:05")
-	safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", joinTime, Cyan, NC, White, displayName, NC, White, gameName, NC)
+	safeLog("[%s] %s[JOIN]%s     Connecting %s%s%s to %s%s%s...", joinTime, Cyan, NC, White, displayName, NC, White, cloneGame.Name, NC)
 	if checkRoot() {
-		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", gameURL, pkg)
+		cmdStr := fmt.Sprintf("am start -a android.intent.action.VIEW -d '%s' -p %s", cloneGame.URL, pkg)
 		_ = exec.Command("su", "-c", cmdStr).Run()
 	} else {
-		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", gameURL, "-p", pkg).Run()
+		_ = exec.Command("am", "start", "-a", "android.intent.action.VIEW", "-d", cloneGame.URL, "-p", pkg).Run()
 	}
+	time.Sleep(600 * time.Millisecond)
+	hideSoftKeyboard()
 
 	reopenTime := time.Now().Format("15:04:05")
-	safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", reopenTime, Green, NC, White, displayName, NC, gameName)
+	safeLog("[%s] %s[OK]%s       %s%s%s synchronized with %s", reopenTime, Green, NC, White, displayName, NC, cloneGame.Name)
 	writeLog("RESTORE", fmt.Sprintf("%s recovered", displayName))
 
 	// 5. Staggered stabilization countdown
@@ -4148,7 +4254,7 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 	res2 := getSystemResources()
 	var cloneMem2 CloneResourceReport
 	for attempt := 0; attempt < 4; attempt++ {
-		cloneMem2 = getCloneMemoryUsage(pkg, gameName)
+		cloneMem2 = getCloneMemoryUsage(pkg, cloneGame.Name)
 		if !cloneMem2.IsEstimated && cloneMem2.PID > 0 {
 			break
 		}
@@ -4168,7 +4274,7 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 		safeLog("[%s] %s[STABLE]%s   %s%s%s online. Monitoring resumed.", stableTime, Green, NC, White, displayName, NC)
 	}
 
-	sendRecoveryWebhook(displayName, pkg, gameName, res2, cloneMem2)
+	sendRecoveryWebhook(displayName, pkg, cloneGame.Name, res2, cloneMem2)
 
 	// Post-recovery stabilization: do not touch or re-tile other running clones to prevent ping-pong reopen loops
 
