@@ -1,6 +1,7 @@
 1.4.4
 
 [New Functions & Features]
++ Added configureTargetExperience() with per-clone Custom Game & VIP link configuration (Mixed Mode)
 + Added getInstalledDeltaVersion() & getDisplayDeltaVersion() live APK version detection
 + Added extractVersionFromAPK() fallback zip reader parsing AndroidManifest.xml
 + Added isDeltaOutdated() semantic version comparison against official Delta API
