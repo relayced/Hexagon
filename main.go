@@ -3244,6 +3244,174 @@ var (
 	detectedDeltaUpdate = ""
 )
 
+func compareVersions(v1, v2 string) int {
+	p1 := strings.Split(v1, ".")
+	p2 := strings.Split(v2, ".")
+	maxLen := len(p1)
+	if len(p2) > maxLen {
+		maxLen = len(p2)
+	}
+	for i := 0; i < maxLen; i++ {
+		var n1, n2 int
+		if i < len(p1) {
+			n1, _ = strconv.Atoi(p1[i])
+		}
+		if i < len(p2) {
+			n2, _ = strconv.Atoi(p2[i])
+		}
+		if n1 < n2 {
+			return -1
+		}
+		if n1 > n2 {
+			return 1
+		}
+	}
+	return 0
+}
+
+func isDeltaOutdated(installedVer, latestDelta string) bool {
+	if latestDelta == "" {
+		return false
+	}
+	re := regexp.MustCompile(`[0-9]+(\.[0-9]+)+`)
+	latestNums := re.FindString(latestDelta)
+	if latestNums == "" {
+		return latestDelta != CurrentDeltaVersion
+	}
+
+	if installedVer != "" {
+		installedNums := re.FindString(installedVer)
+		if installedNums != "" {
+			return compareVersions(installedNums, latestNums) < 0
+		}
+	}
+
+	currentNums := re.FindString(CurrentDeltaVersion)
+	if currentNums != "" {
+		return compareVersions(currentNums, latestNums) < 0
+	}
+	return latestDelta != CurrentDeltaVersion
+}
+
+func getInstalledDeltaVersion() string {
+	candidates := []string{"com.roblox.client"}
+	if len(activePackages) > 0 {
+		candidates = append(candidates, activePackages...)
+	} else if len(allPackages) > 0 {
+		candidates = append(candidates, allPackages...)
+	}
+
+	for _, pkg := range candidates {
+		cmdStr := fmt.Sprintf("dumpsys package %s 2>/dev/null", pkg)
+		if checkRoot() {
+			cmdStr = fmt.Sprintf("su -c 'dumpsys package %s' 2>/dev/null", pkg)
+		}
+		out, err := exec.Command("sh", "-c", cmdStr).Output()
+		if err == nil && len(out) > 0 {
+			re := regexp.MustCompile(`versionName=([0-9.]+)`)
+			if m := re.FindStringSubmatch(string(out)); len(m) > 1 {
+				return m[1]
+			}
+		}
+	}
+	return ""
+}
+
+func checkForUpgradeDialog() bool {
+	cmds := []string{
+		"dumpsys window windows 2>/dev/null",
+		"dumpsys activity top 2>/dev/null",
+		"dumpsys window visible-apps 2>/dev/null",
+		"logcat -d -t 150 2>/dev/null",
+	}
+	if checkRoot() {
+		cmds = append(cmds, "su -c 'dumpsys window windows' 2>/dev/null")
+		cmds = append(cmds, "su -c 'logcat -d -t 150' 2>/dev/null")
+	}
+	for _, cmdStr := range cmds {
+		out, err := exec.Command("sh", "-c", cmdStr).Output()
+		if err == nil && len(out) > 0 {
+			s := string(out)
+			if strings.Contains(s, "Roblox Upgrade") ||
+				strings.Contains(s, "out of date and will not work") ||
+				strings.Contains(s, "Taking you to the Google Play Store") ||
+				(strings.Contains(s, "UpgradeDialog") && strings.Contains(strings.ToLower(s), "roblox")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isDeltaUpdateAvailable() bool {
+	deltaUpdateMu.Lock()
+	if detectedDeltaUpdate != "" {
+		deltaUpdateMu.Unlock()
+		return true
+	}
+	deltaUpdateMu.Unlock()
+
+	latestName, _, err := fetchLatestDeltaVersion()
+	if err == nil && latestName != "" {
+		installedVer := getInstalledDeltaVersion()
+		if isDeltaOutdated(installedVer, latestName) {
+			deltaUpdateMu.Lock()
+			detectedDeltaUpdate = latestName
+			deltaUpdateMu.Unlock()
+			return true
+		}
+	}
+	return false
+}
+
+func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
+	deltaUpdateMu.Lock()
+	ver := detectedDeltaUpdate
+	deltaUpdateMu.Unlock()
+	if ver == "" {
+		ver = "Latest Delta Available"
+	}
+
+	currTime := time.Now().Format("15:04:05")
+	safeLog("\n[%s] %s[ABORT]%s Delta Upgrade detected (%s)! Reason: %s",
+		currTime, Red, NC, ver, reason)
+	safeLog("  %s[INFO]%s Immediately stopping clone joining process as clients cannot connect.", Amber, NC)
+	writeLog("DELTA_UPGRADE_ABORT", fmt.Sprintf("Joining stopped: %s (%s)", ver, reason))
+
+	stopList := pkgsToStop
+	if len(stopList) == 0 {
+		stopList = activePackages
+	}
+	for _, pkg := range stopList {
+		if checkRoot() {
+			_ = exec.Command("su", "-c", "am force-stop "+pkg).Run()
+		} else {
+			_ = exec.Command("am", "force-stop", pkg).Run()
+		}
+	}
+
+	if discordWebhook != "" {
+		fields := []DiscordEmbedField{
+			{Name: "🛑 Action", Value: "`Joining Stopped Immediately`", Inline: true},
+			{Name: "📱 Current Client", Value: fmt.Sprintf("`%s`", CurrentDeltaVersion), Inline: true},
+			{Name: "🚀 Required Delta", Value: fmt.Sprintf("`%s`", ver), Inline: true},
+			{Name: "📥 Download Link", Value: fmt.Sprintf("[%s](%s)", DeltaDownloadURL, DeltaDownloadURL), Inline: false},
+			{Name: "🕒 Stopped At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
+		}
+		sendRichWebhook(EventGeneral, "🛑 Joining Aborted: Delta Upgrade Required",
+			"Roblox has forced a client upgrade. The joining process of all clones was **immediately stopped** because outdated clients cannot connect to games.\n\nPlease download and install the new Delta clone APKs.",
+			15158332, fields)
+	}
+
+	drawAlertCard("ERROR", "[!] DELTA UPGRADE REQUIRED - JOINING STOPPED",
+		fmt.Sprintf("Required Version: %s", ver),
+		"Roblox is out of date and cannot connect.",
+		fmt.Sprintf("Download updated APK: %s", DeltaDownloadURL))
+
+	pad := getMenuLeftPad()
+	fmt.Printf("\n%s%s[!] Joining halted. Update your Delta clones and rerun Nefarious.%s\n\n", pad, Bold+Red, NC)
+}
+
 func fetchLatestDeltaVersion() (string, string, error) {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -3295,7 +3463,8 @@ func checkDeltaUpdate(isStartup bool) {
 		return
 	}
 
-	if latestName != "" && latestName != CurrentDeltaVersion {
+	installedVer := getInstalledDeltaVersion()
+	if isDeltaOutdated(installedVer, latestName) {
 		deltaUpdateMu.Lock()
 		alreadyNotified := deltaUpdateNotified
 		deltaUpdateNotified = true
@@ -3976,8 +4145,24 @@ func configureWebhook() {
 // INSTANCE LAUNCH & ORCHESTRATION
 // ============================================================================
 
-func launchInitialInstances() {
+func launchInitialInstances() bool {
+	// Pre-launch check: abort immediately if Delta upgrade is required
+	if isDeltaUpdateAvailable() {
+		handleDeltaUpgradeAbort("Pre-Launch Delta Check", nil)
+		return false
+	}
+
 	for i := 0; i < cloneCount; i++ {
+		// Check before launching each clone
+		if isDeltaUpdateAvailable() {
+			handleDeltaUpgradeAbort("Pre-Launch Delta Check", activePackages[:i])
+			return false
+		}
+		if checkForUpgradeDialog() {
+			handleDeltaUpgradeAbort("Roblox Upgrade Dialog Detected", activePackages[:i])
+			return false
+		}
+
 		pkg := activePackages[i]
 		displayName := fmt.Sprintf("Clone %d", i+1)
 
@@ -3995,12 +4180,22 @@ func launchInitialInstances() {
 		if errLaunch != nil || strings.Contains(string(outLaunch), "Error") {
 			safeLog("  %s[LAUNCH LOG]%s %s: %s", Amber, NC, displayName, strings.TrimSpace(string(outLaunch)))
 		}
-		// Give the activity window time to gain focus before dismissing IME,
-		// since Android raises the keyboard asynchronously after the transition.
 		time.Sleep(600 * time.Millisecond)
 		hideSoftKeyboard()
 
+		// Check if launching triggered the upgrade dialog
+		if checkForUpgradeDialog() {
+			handleDeltaUpgradeAbort("Roblox Upgrade Dialog Detected", activePackages[:i+1])
+			return false
+		}
+
 		runAnimatedCountdown(fmt.Sprintf("Warming engine (%s)...", displayName), 8, "READY", fmt.Sprintf("Client engine ready (%s)", displayName))
+
+		// Check again after warming engine before connecting to game
+		if isDeltaUpdateAvailable() || checkForUpgradeDialog() {
+			handleDeltaUpgradeAbort("Roblox Upgrade Detected During Warmup", activePackages[:i+1])
+			return false
+		}
 
 		cloneGame := getCloneGameConfig(pkg)
 		drawLaunchStatusCard(i+1, cloneCount, "Connecting to Game", fmt.Sprintf("Connecting to %s...", cloneGame.Name))
@@ -4018,17 +4213,26 @@ func launchInitialInstances() {
 		time.Sleep(600 * time.Millisecond)
 		hideSoftKeyboard()
 
+		// Check if connecting to game triggered upgrade dialog
+		if checkForUpgradeDialog() {
+			handleDeltaUpgradeAbort("Roblox Upgrade Dialog Detected", activePackages[:i+1])
+			return false
+		}
+
 		if i < cloneCount-1 {
 			drawLaunchStatusCard(i+1, cloneCount, "Stabilizing Memory", "Cooling down before launching next clone...")
 			runAnimatedCountdown(fmt.Sprintf("Stabilizing memory (%s)...", displayName), 15, "STABLE", fmt.Sprintf("%s stabilized", displayName))
+			if checkForUpgradeDialog() {
+				handleDeltaUpgradeAbort("Roblox Upgrade Dialog Detected", activePackages[:i+1])
+				return false
+			}
 		}
 	}
-
-
 
 	if enableRejoin {
 		drawSentinelActiveCard()
 	}
+	return true
 }
 
 // ============================================================================
@@ -4190,6 +4394,11 @@ func executeCloneRecovery(pkg, displayName string, isANR bool) {
 	netUp := networkOnline
 	networkMu.RUnlock()
 	if !netUp {
+		return
+	}
+
+	if isDeltaUpdateAvailable() || checkForUpgradeDialog() {
+		handleDeltaUpgradeAbort("Sentinel Watchdog Recovery", []string{pkg})
 		return
 	}
 
@@ -4984,8 +5193,14 @@ func main() {
 	fmt.Println()
 
 	hideSoftKeyboard()
-	launchInitialInstances()
+	launched := launchInitialInstances()
 	hideSoftKeyboard()
+
+	if !launched {
+		safeLog("\n%s[STOPPED]%s Joining aborted due to Delta/Roblox upgrade. Exiting.", Red, NC)
+		fmt.Printf("\n%s[STOPPED] Joining process halted. Please update your Delta clone APKs before continuing.%s\n\n", Red, NC)
+		return
+	}
 
 	setDashboardStatus("Monitoring 24/7 (Auto-Rejoin)", Green)
 
