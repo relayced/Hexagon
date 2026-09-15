@@ -19,13 +19,91 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # Auto-detect terminal width & calculate dynamic horizontal centering
-TERM_COLS=$(tput cols 2>/dev/null || echo 0)
-if [ -z "$TERM_COLS" ] || [ "$TERM_COLS" -le 0 ]; then
-    TERM_COLS=$(stty size 2>/dev/null | awk '{print $2}')
-fi
-if [ -z "$TERM_COLS" ] || [ "$TERM_COLS" -le 0 ]; then
-    TERM_COLS=${COLUMNS:-80}
-fi
+# Handles interactive terminal as well as piped execution (curl ... | bash)
+detect_terminal_geometry() {
+    local sz=""
+    local c=""
+    local r=""
+
+    # 1. Try stty size on /dev/tty (controlling terminal device in Termux)
+    if [ -e /dev/tty ]; then
+        sz=$(stty size < /dev/tty 2>/dev/null || true)
+        if [ -z "$sz" ]; then
+            sz=$(/system/bin/stty size < /dev/tty 2>/dev/null || true)
+        fi
+    fi
+
+    # 2. Try stty size on stdout (fd 1) or stderr (fd 2) - unpiped terminal descriptors
+    if [ -z "$sz" ]; then
+        sz=$(stty size <&1 2>/dev/null || stty size <&2 2>/dev/null || true)
+    fi
+    if [ -z "$sz" ]; then
+        sz=$(/system/bin/stty size <&1 2>/dev/null || /system/bin/stty size <&2 2>/dev/null || true)
+    fi
+
+    # 3. Try stty size directly on stdin
+    if [ -z "$sz" ]; then
+        sz=$(stty size 2>/dev/null || true)
+    fi
+
+    if [ -n "$sz" ]; then
+        set -- $sz
+        r="$1"
+        c="$2"
+        if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then
+            echo "$c ${r:-24}"
+            return
+        fi
+    fi
+
+    # 4. Try tput cols with /dev/tty, fd 1, or default
+    if [ -e /dev/tty ]; then
+        c=$(tput cols < /dev/tty 2>/dev/null || true)
+        r=$(tput lines < /dev/tty 2>/dev/null || true)
+    fi
+    if [ -z "$c" ] || [ "$c" -le 0 ] 2>/dev/null; then
+        c=$(tput cols <&1 2>/dev/null || tput cols 2>/dev/null || true)
+        r=$(tput lines <&1 2>/dev/null || tput lines 2>/dev/null || true)
+    fi
+    if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then
+        echo "$c ${r:-24}"
+        return
+    fi
+
+    # 5. Try stty -a parsing
+    local raw=""
+    if [ -e /dev/tty ]; then
+        raw=$(stty -a < /dev/tty 2>/dev/null || true)
+    fi
+    if [ -z "$raw" ]; then
+        raw=$(stty -a <&1 2>/dev/null || stty -a 2>/dev/null || true)
+    fi
+    if [ -n "$raw" ]; then
+        c=$(echo "$raw" | grep -o 'columns [0-9]\+' | head -n 1 | awk '{print $2}' || true)
+        r=$(echo "$raw" | grep -o 'rows [0-9]\+' | head -n 1 | awk '{print $2}' || true)
+        if [ -n "$c" ] && [ "$c" -gt 0 ] 2>/dev/null; then
+            echo "$c ${r:-24}"
+            return
+        fi
+    fi
+
+    # 6. Check environment variable COLUMNS/LINES
+    if [ -n "$COLUMNS" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
+        echo "$COLUMNS ${LINES:-24}"
+        return
+    fi
+
+    # 7. Fallback default
+    echo "80 24"
+}
+
+read -r TERM_COLS TERM_LINES <<< "$(detect_terminal_geometry)"
+TERM_COLS=${TERM_COLS:-80}
+TERM_LINES=${TERM_LINES:-24}
+
+# Export so Go child process inherits the detected terminal geometry
+export COLUMNS="$TERM_COLS"
+export LINES="$TERM_LINES"
 
 BOX_WIDTH=48
 if [ "$TERM_COLS" -gt "$BOX_WIDTH" ]; then

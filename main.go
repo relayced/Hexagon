@@ -1917,11 +1917,15 @@ func detectTerminalSize() (int, int) {
 		}
 	}
 
-	// 2. Try stty size with /dev/tty redirection (standard for Android Termux)
+	// 2. Try stty size with /dev/tty or stdout/stderr redirection (standard for Android Termux)
 	sttyCmds := []string{
 		"stty size < /dev/tty 2>/dev/null",
-		"stty size 2>/dev/null",
+		"stty size <&1 2>/dev/null",
+		"stty size <&2 2>/dev/null",
 		"/system/bin/stty size < /dev/tty 2>/dev/null",
+		"/system/bin/stty size <&1 2>/dev/null",
+		"/system/bin/stty size <&2 2>/dev/null",
+		"stty size 2>/dev/null",
 	}
 	for _, cmdStr := range sttyCmds {
 		if out, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
@@ -1936,16 +1940,18 @@ func detectTerminalSize() (int, int) {
 		}
 	}
 
-	// 3. Try tput cols / tput lines with /dev/tty
+	// 3. Try tput cols / tput lines with /dev/tty or stdout/stderr
 	tputCmds := []string{
 		"tput cols < /dev/tty 2>/dev/null",
+		"tput cols <&1 2>/dev/null",
+		"tput cols <&2 2>/dev/null",
 		"tput cols 2>/dev/null",
 	}
 	for _, cmdStr := range tputCmds {
 		if outW, err := exec.Command("sh", "-c", cmdStr).Output(); err == nil {
 			if w, err := strconv.Atoi(strings.TrimSpace(string(outW))); err == nil && w > 10 {
 				h := 24
-				if outH, err := exec.Command("sh", "-c", "tput lines < /dev/tty 2>/dev/null").Output(); err == nil {
+				if outH, err := exec.Command("sh", "-c", "tput lines < /dev/tty 2>/dev/null || tput lines <&1 2>/dev/null || tput lines 2>/dev/null").Output(); err == nil {
 					if hVal, err := strconv.Atoi(strings.TrimSpace(string(outH))); err == nil && hVal > 5 {
 						h = hVal
 					}
@@ -2008,13 +2014,13 @@ func detectTerminalSize() (int, int) {
 		swDp := (screenPxW * 160) / density
 		// Termux standard font consumes ~8.2 dp per character column
 		calcCols := int(float64(swDp) / 8.2)
-		if calcCols >= 36 && calcCols <= 80 {
+		if calcCols >= 36 && calcCols <= 240 {
 			return calcCols, 24
 		}
 	}
 
-	// 5. Native Termux Portrait Baseline (46 columns, 24 rows)
-	return 46, 24
+	// 5. Native Termux Baseline (80 columns, 24 rows)
+	return 80, 24
 }
 
 func calculateBoxDimensions(boxHeight int) (boxWidth, leftPadding, topPadding int) {
