@@ -3166,48 +3166,111 @@ func checkUpdates() {
 		statusColor = Amber
 	}
 
+	// Also check Delta Executor status dynamically
+	latestDelta, lastMod, deltaErr := fetchLatestDeltaVersion()
+	installedDelta := getInstalledDeltaVersion()
+	displayDelta := getDisplayDeltaVersion()
+	isDeltaOld := false
+	if deltaErr == nil && latestDelta != "" {
+		isDeltaOld = isDeltaOutdated(installedDelta, latestDelta)
+		if isDeltaOld {
+			deltaUpdateMu.Lock()
+			detectedDeltaUpdate = latestDelta
+			deltaUpdateNotified = true
+			deltaUpdateMu.Unlock()
+
+			writeLog("DELTA_UPDATE", fmt.Sprintf("New Delta: %s (Current: %s)", latestDelta, displayDelta))
+
+			if discordWebhook != "" {
+				fields := []DiscordEmbedField{
+					{Name: "📱 Current Delta Version", Value: fmt.Sprintf("`%s`", displayDelta), Inline: true},
+					{Name: "🚀 New Delta Version", Value: fmt.Sprintf("`%s`", latestDelta), Inline: true},
+					{Name: "📅 Release Date", Value: fmt.Sprintf("`%s`", lastMod), Inline: true},
+					{Name: "📥 Download Link", Value: fmt.Sprintf("[%s](%s)", DeltaDownloadURL, DeltaDownloadURL), Inline: false},
+					{Name: "🕒 Detected At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
+				}
+				sendRichWebhook(EventGeneral, "⚠️ Delta Executor Update Detected",
+					"A new version of **Delta Executor** has been detected on the official distribution server!\n\nIf your Roblox clones start crashing, freezing, or showing update dialogs, please update your Delta clone APKs.",
+					16753920, fields)
+			}
+		}
+	}
+
 	verRows := []BoxRow{
 		{
 			Type:       RowKeyValue,
-			Label:      "Installed  : ",
+			Label:      "Nefarious Hub: ",
 			LabelColor: Gray,
 			Value:      "v" + ScriptVersion,
 			ValueColor: White,
 		},
 		{
 			Type:       RowKeyValue,
-			Label:      "Latest Req : ",
-			LabelColor: Gray,
-			Value:      "v" + latestVersion,
-			ValueColor: White,
-		},
-	}
-	if releaseDate != "" {
-		verRows = append(verRows, BoxRow{
-			Type:       RowKeyValue,
-			Label:      "Release Date: ",
-			LabelColor: Gray,
-			Value:      releaseDate,
-			ValueColor: Gray,
-		})
-	}
-	verRows = append(verRows,
-		BoxRow{Type: RowSeparator},
-		BoxRow{
-			Type:       RowStatus,
-			Label:      "Validation : ",
+			Label:      "Script Status: ",
 			LabelColor: Gray,
 			Value:      statusText,
 			ValueColor: statusColor,
 		},
-	)
+		{Type: RowSeparator},
+		{
+			Type:       RowKeyValue,
+			Label:      "Installed APK: ",
+			LabelColor: Gray,
+			Value:      displayDelta,
+			ValueColor: White,
+		},
+	}
 
-	drawStepCard("VERSION VERIFICATION", "Integrity & Payload Compatibility Check", verRows)
-	time.Sleep(1500 * time.Millisecond)
+	if deltaErr == nil && latestDelta != "" {
+		verRows = append(verRows, BoxRow{
+			Type:       RowKeyValue,
+			Label:      "Latest Delta : ",
+			LabelColor: Gray,
+			Value:      latestDelta,
+			ValueColor: White,
+		})
+
+		if isDeltaOld {
+			verRows = append(verRows,
+				BoxRow{
+					Type:       RowKeyValue,
+					Label:      "Delta Status : ",
+					LabelColor: Gray,
+					Value:      "UPDATE AVAILABLE",
+					ValueColor: Bold + Amber,
+				},
+				BoxRow{Type: RowSeparator},
+				BoxRow{
+					Type:        RowSubtitle,
+					CustomText:  "• Newer Delta APK available on official server.",
+					CustomColor: Dim,
+				},
+				BoxRow{
+					Type:       RowKeyValue,
+					Label:      "Download Link: ",
+					LabelColor: Gray,
+					Value:      DeltaDownloadURL,
+					ValueColor: Cyan,
+				},
+			)
+		} else {
+			verRows = append(verRows, BoxRow{
+				Type:       RowKeyValue,
+				Label:      "Delta Status : ",
+				LabelColor: Gray,
+				Value:      "VERIFIED (Up to Date)",
+				ValueColor: Green,
+			})
+		}
+	}
+
+	clearTerminal()
+	drawStepCard("SYSTEM VERIFICATION", "Integrity & Client Diagnostics", verRows)
+	time.Sleep(2000 * time.Millisecond)
 
 	if isOutdated || isDateExpired {
-		safeLog("\n  %s[CRITICAL]%s Installed version v%s is outdated (Required: v%s). Execution halted.",
-			Red, NC, ScriptVersion, latestVersion)
+		writeLog("VERSION", fmt.Sprintf("Installed version v%s is outdated (Required: v%s). Execution halted.", ScriptVersion, latestVersion))
+		clearTerminal()
 		drawAlertCard("ERROR", "[X] CRITICAL: UPDATE REQUIRED",
 			fmt.Sprintf("Installed v%s is lower than required v%s.", ScriptVersion, latestVersion),
 			"Launch blocked to prevent ban risks and crashing.",
@@ -3217,12 +3280,10 @@ func checkUpdates() {
 	}
 
 	if reqErr != nil {
-		safeLog("  %s[INFO]%s Network check skipped (using cached v%s)", Gray, NC, ScriptVersion)
+		writeLog("VERSION", fmt.Sprintf("Network check skipped (using cached v%s)", ScriptVersion))
 	} else {
-		safeLog("  %s[OK]%s Version v%s verified and compatible.", Green, NC, ScriptVersion)
+		writeLog("VERSION", fmt.Sprintf("Version v%s verified and compatible.", ScriptVersion))
 	}
-
-	checkDeltaUpdate(true)
 }
 
 // ============================================================================
@@ -3625,6 +3686,9 @@ func fetchLatestDeltaVersion() (string, string, error) {
 }
 
 func checkDeltaUpdate(isStartup bool) {
+	if isStartup {
+		return
+	}
 	latestName, lastMod, err := fetchLatestDeltaVersion()
 	if err != nil {
 		return
@@ -3641,20 +3705,8 @@ func checkDeltaUpdate(isStartup bool) {
 
 		if !alreadyNotified {
 			currTime := time.Now().Format("15:04:05")
-			safeLog("\n[%s] %s[DELTA UPDATE]%s New Delta version detected: %s%s%s (Installed: %s)",
-				currTime, Amber, NC, Bold+White, latestName, NC, displayVer)
-			safeLog("  %sDownload:%s %s", Cyan, NC, DeltaDownloadURL)
 			writeLog("DELTA_UPDATE", fmt.Sprintf("New Delta: %s (Current: %s)", latestName, displayVer))
-
-			if isStartup {
-				drawAlertCard("WARN", "[!] DELTA UPDATE AVAILABLE",
-					fmt.Sprintf("Latest : %s", latestName),
-					fmt.Sprintf("Current: %s", displayVer),
-					fmt.Sprintf("Link: %s", DeltaDownloadURL))
-				time.Sleep(3 * time.Second)
-			} else {
-				setDashboardEvent("Delta Update: "+latestName, Amber, "UPDATE", "New: "+latestName, "", currTime)
-			}
+			setDashboardEvent("Delta Update: "+latestName, Amber, "UPDATE", "New: "+latestName, "", currTime)
 
 			// Dispatch alert to Discord Webhook
 			fields := []DiscordEmbedField{
