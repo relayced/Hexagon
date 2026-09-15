@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/sha256"
@@ -29,7 +30,6 @@ const (
 	VersionURL    = "https://raw.githubusercontent.com/relayced/Hexagon/main/version.txt"
 	LogFileName   = "farming_log.txt"
 
-	CurrentDeltaVersion = "Delta-2.736.1408-02"
 	DeltaDownloadURL    = "https://delta.filenetwork.vip/android.html"
 	DeltaAPIURL         = "https://delta.filenetwork.vip/get_files.php"
 	DiscordInviteURL    = "discord.gg/6jg6PbWrz"
@@ -3276,7 +3276,11 @@ func isDeltaOutdated(installedVer, latestDelta string) bool {
 	re := regexp.MustCompile(`[0-9]+(\.[0-9]+)+`)
 	latestNums := re.FindString(latestDelta)
 	if latestNums == "" {
-		return latestDelta != CurrentDeltaVersion
+		return false
+	}
+
+	if installedVer == "" {
+		installedVer = getInstalledDeltaVersion()
 	}
 
 	if installedVer != "" {
@@ -3286,35 +3290,146 @@ func isDeltaOutdated(installedVer, latestDelta string) bool {
 		}
 	}
 
-	currentNums := re.FindString(CurrentDeltaVersion)
-	if currentNums != "" {
-		return compareVersions(currentNums, latestNums) < 0
-	}
-	return latestDelta != CurrentDeltaVersion
+	return false
 }
 
-func getInstalledDeltaVersion() string {
-	candidates := []string{"com.roblox.client"}
-	if len(activePackages) > 0 {
-		candidates = append(candidates, activePackages...)
-	} else if len(allPackages) > 0 {
-		candidates = append(candidates, allPackages...)
-	}
+var (
+	cachedInstalledDeltaVersion string
+	cachedDeltaVersionMu        sync.Mutex
+	lastDeltaVersionCheck       time.Time
+)
 
-	for _, pkg := range candidates {
-		cmdStr := fmt.Sprintf("dumpsys package %s 2>/dev/null", pkg)
-		if checkRoot() {
-			cmdStr = fmt.Sprintf("su -c 'dumpsys package %s' 2>/dev/null", pkg)
-		}
-		out, err := exec.Command("sh", "-c", cmdStr).Output()
-		if err == nil && len(out) > 0 {
-			re := regexp.MustCompile(`versionName=([0-9.]+)`)
-			if m := re.FindStringSubmatch(string(out)); len(m) > 1 {
-				return m[1]
+func extractVersionFromAPK(apkPath string) string {
+	r, err := zip.OpenReader(apkPath)
+	if err != nil {
+		return ""
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.Name == "AndroidManifest.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				return ""
 			}
+			defer rc.Close()
+			buf := make([]byte, 16384)
+			n, _ := io.ReadFull(rc, buf)
+			data := string(buf[:n])
+			re := regexp.MustCompile(`([0-9]+\.[0-9]+\.[0-9]+[0-9a-zA-Z._-]*)`)
+			if m := re.FindString(data); m != "" {
+				return m
+			}
+			cleanData := strings.ReplaceAll(data, "\x00", "")
+			if m := re.FindString(cleanData); m != "" {
+				return m
+			}
+			break
 		}
 	}
 	return ""
+}
+
+func getInstalledDeltaVersion() string {
+	cachedDeltaVersionMu.Lock()
+	if cachedInstalledDeltaVersion != "" && time.Since(lastDeltaVersionCheck) < 3*time.Minute {
+		v := cachedInstalledDeltaVersion
+		cachedDeltaVersionMu.Unlock()
+		return v
+	}
+	cachedDeltaVersionMu.Unlock()
+
+	var candidates []string
+	if len(activePackages) > 0 {
+		candidates = append(candidates, activePackages...)
+	}
+	if len(allPackages) > 0 {
+		candidates = append(candidates, allPackages...)
+	}
+	candidates = append(candidates, "com.roblox.client")
+
+	seen := make(map[string]bool)
+	var uniqueCandidates []string
+	for _, pkg := range candidates {
+		if !seen[pkg] {
+			seen[pkg] = true
+			uniqueCandidates = append(uniqueCandidates, pkg)
+		}
+	}
+
+	versionRegex := regexp.MustCompile(`versionName=["']?([0-9a-zA-Z._-]+)["']?`)
+
+	for _, pkg := range uniqueCandidates {
+		// 1. Try dumpsys package, cmd package dump, and pm dump
+		dumpCmds := []string{
+			fmt.Sprintf("dumpsys package %s 2>/dev/null", pkg),
+			fmt.Sprintf("cmd package dump %s 2>/dev/null", pkg),
+			fmt.Sprintf("pm dump %s 2>/dev/null", pkg),
+		}
+		if checkRoot() {
+			dumpCmds = append([]string{
+				fmt.Sprintf("su -c 'dumpsys package %s' 2>/dev/null", pkg),
+				fmt.Sprintf("su -c 'cmd package dump %s' 2>/dev/null", pkg),
+				fmt.Sprintf("su -c 'pm dump %s' 2>/dev/null", pkg),
+			}, dumpCmds...)
+		}
+
+		for _, cmdStr := range dumpCmds {
+			out, err := exec.Command("sh", "-c", cmdStr).Output()
+			if err == nil && len(out) > 0 {
+				if m := versionRegex.FindStringSubmatch(string(out)); len(m) > 1 {
+					found := strings.TrimSpace(m[1])
+					if found != "" {
+						cachedDeltaVersionMu.Lock()
+						cachedInstalledDeltaVersion = found
+						lastDeltaVersionCheck = time.Now()
+						cachedDeltaVersionMu.Unlock()
+						return found
+					}
+				}
+			}
+		}
+
+		// 2. Fallback: try pm path to inspect APK
+		pathCmds := []string{
+			fmt.Sprintf("pm path %s 2>/dev/null", pkg),
+		}
+		if checkRoot() {
+			pathCmds = append([]string{fmt.Sprintf("su -c 'pm path %s' 2>/dev/null", pkg)}, pathCmds...)
+		}
+		for _, pCmd := range pathCmds {
+			out, err := exec.Command("sh", "-c", pCmd).Output()
+			if err == nil && len(out) > 0 {
+				lines := strings.Split(string(out), "\n")
+				for _, l := range lines {
+					l = strings.TrimSpace(l)
+					if strings.HasPrefix(l, "package:") {
+						apkPath := strings.TrimPrefix(l, "package:")
+						if ver := extractVersionFromAPK(apkPath); ver != "" {
+							cachedDeltaVersionMu.Lock()
+							cachedInstalledDeltaVersion = ver
+							lastDeltaVersionCheck = time.Now()
+							cachedDeltaVersionMu.Unlock()
+							return ver
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func getDisplayDeltaVersion() string {
+	ver := getInstalledDeltaVersion()
+	if ver == "" {
+		return "Not Installed / Unknown"
+	}
+	if strings.HasPrefix(strings.ToLower(ver), "delta-") {
+		return ver
+	}
+	return "Delta-" + ver
 }
 
 func checkForUpgradeDialog() bool {
@@ -3369,14 +3484,22 @@ func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
 	ver := detectedDeltaUpdate
 	deltaUpdateMu.Unlock()
 	if ver == "" {
-		ver = "Latest Delta Available"
+		latestName, _, err := fetchLatestDeltaVersion()
+		if err == nil && latestName != "" {
+			ver = latestName
+		} else {
+			ver = "Latest Delta Available"
+		}
 	}
+
+	installedVer := getDisplayDeltaVersion()
 
 	currTime := time.Now().Format("15:04:05")
 	safeLog("\n[%s] %s[ABORT]%s Delta Upgrade detected (%s)! Reason: %s",
 		currTime, Red, NC, ver, reason)
 	safeLog("  %s[INFO]%s Immediately stopping clone joining process as clients cannot connect.", Amber, NC)
-	writeLog("DELTA_UPGRADE_ABORT", fmt.Sprintf("Joining stopped: %s (%s)", ver, reason))
+	safeLog("  %s[INFO]%s Detected Installed Client: %s", Cyan, NC, installedVer)
+	writeLog("DELTA_UPGRADE_ABORT", fmt.Sprintf("Joining stopped: %s (Installed: %s, Reason: %s)", ver, installedVer, reason))
 
 	stopList := pkgsToStop
 	if len(stopList) == 0 {
@@ -3393,7 +3516,7 @@ func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
 	if discordWebhook != "" {
 		fields := []DiscordEmbedField{
 			{Name: "🛑 Action", Value: "`Joining Stopped Immediately`", Inline: true},
-			{Name: "📱 Current Client", Value: fmt.Sprintf("`%s`", CurrentDeltaVersion), Inline: true},
+			{Name: "📱 Current Client", Value: fmt.Sprintf("`%s`", installedVer), Inline: true},
 			{Name: "🚀 Required Delta", Value: fmt.Sprintf("`%s`", ver), Inline: true},
 			{Name: "📥 Download Link", Value: fmt.Sprintf("[%s](%s)", DeltaDownloadURL, DeltaDownloadURL), Inline: false},
 			{Name: "🕒 Stopped At", Value: time.Now().Format("2006-01-02 15:04:05"), Inline: true},
@@ -3404,9 +3527,9 @@ func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
 	}
 
 	drawAlertCard("ERROR", "[!] DELTA UPGRADE REQUIRED - JOINING STOPPED",
-		fmt.Sprintf("Required Version: %s", ver),
+		fmt.Sprintf("Required: %s | Installed: %s", ver, installedVer),
 		"Roblox is out of date and cannot connect.",
-		fmt.Sprintf("Download updated APK: %s", DeltaDownloadURL))
+		fmt.Sprintf("Download APK: %s", DeltaDownloadURL))
 
 	pad := getMenuLeftPad()
 	fmt.Printf("\n%s%s[!] Joining halted. Update your Delta clones and rerun Nefarious.%s\n\n", pad, Bold+Red, NC)
@@ -3464,6 +3587,7 @@ func checkDeltaUpdate(isStartup bool) {
 	}
 
 	installedVer := getInstalledDeltaVersion()
+	displayVer := getDisplayDeltaVersion()
 	if isDeltaOutdated(installedVer, latestName) {
 		deltaUpdateMu.Lock()
 		alreadyNotified := deltaUpdateNotified
@@ -3474,14 +3598,14 @@ func checkDeltaUpdate(isStartup bool) {
 		if !alreadyNotified {
 			currTime := time.Now().Format("15:04:05")
 			safeLog("\n[%s] %s[DELTA UPDATE]%s New Delta version detected: %s%s%s (Installed: %s)",
-				currTime, Amber, NC, Bold+White, latestName, NC, CurrentDeltaVersion)
+				currTime, Amber, NC, Bold+White, latestName, NC, displayVer)
 			safeLog("  %sDownload:%s %s", Cyan, NC, DeltaDownloadURL)
-			writeLog("DELTA_UPDATE", fmt.Sprintf("New Delta: %s (Current: %s)", latestName, CurrentDeltaVersion))
+			writeLog("DELTA_UPDATE", fmt.Sprintf("New Delta: %s (Current: %s)", latestName, displayVer))
 
 			if isStartup {
 				drawAlertCard("WARN", "[!] DELTA UPDATE AVAILABLE",
 					fmt.Sprintf("Latest : %s", latestName),
-					fmt.Sprintf("Current: %s", CurrentDeltaVersion),
+					fmt.Sprintf("Current: %s", displayVer),
 					fmt.Sprintf("Link: %s", DeltaDownloadURL))
 				time.Sleep(3 * time.Second)
 			} else {
@@ -3490,7 +3614,7 @@ func checkDeltaUpdate(isStartup bool) {
 
 			// Dispatch alert to Discord Webhook
 			fields := []DiscordEmbedField{
-				{Name: "📱 Current Delta Version", Value: fmt.Sprintf("`%s`", CurrentDeltaVersion), Inline: true},
+				{Name: "📱 Current Delta Version", Value: fmt.Sprintf("`%s`", displayVer), Inline: true},
 				{Name: "🚀 New Delta Version", Value: fmt.Sprintf("`%s`", latestName), Inline: true},
 				{Name: "📅 Release Date", Value: fmt.Sprintf("`%s`", lastMod), Inline: true},
 				{Name: "📥 Download Link", Value: fmt.Sprintf("[%s](%s)", DeltaDownloadURL, DeltaDownloadURL), Inline: false},
