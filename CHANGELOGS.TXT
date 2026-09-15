@@ -1,3 +1,26 @@
+Nefarious Hub - v1.4.4 Patch Notes
+====================================
+
+**[New Features]**
++ Added Dynamic APK Version Detection — live package manager querying (`dumpsys package`, `cmd package dump`, `pm dump`, and direct `AndroidManifest.xml` APK parsing) automatically detects installed clone APK versions without hardcoding.
++ Added Delta Upgrade Proactive Guard — immediately halts clone launching if an outdated APK is detected or if Roblox displays an Upgrade dialog, preventing connection failures and infinite rejoin loops.
++ Added Automated Process Cleanup on Abort — cleanly force-stops all clone packages in the background and dispatches rich Discord webhook notifications with required versions and official download URLs.
++ Added Unified System Verification UI — consolidated Script Integrity and Delta Client diagnostics into a single centered, double-bordered card at startup, eliminating screen clutter.
+
+**[Improvements]**
++ Redesigned Delta Upgrade Abort screen with a dedicated, centered high-contrast card showing detailed trigger reasons, installed version, latest version, and download link.
++ Eliminated raw, unformatted console log lines that previously broke mid-word across narrow mobile terminal screens.
++ Added screen resets (`clearTerminal`) before alert and abort cards to eliminate stale, cut-off tables from lingering in the scrollback buffer.
++ Improved terminal geometry detection and centering across Termux subshells.
++ Added in-memory version caching to prevent repeated Android package dumps during runtime.
+
+**[Bug Fixes]**
++ Fixed hardcoded Delta version (`Delta-2.736.1408-02`) causing outdated version displays and manual code bump requirements.
++ Fixed duplicate `[STOPPED]` and `[ABORT]` console messages spamming the terminal upon launch cancellation.
++ Fixed custom game selection prompt not appearing per clone during multi-instance setup.
++ Fixed long URLs wrapping awkwardly onto multiple lines inside small terminal alert cards.
+
+====================================
 Nefarious Hub - v1.4.3 Patch Notes
 ====================================
 

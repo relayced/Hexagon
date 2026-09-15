@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	ScriptVersion = "1.4.3"
+	ScriptVersion = "1.4.4"
 	VersionURL    = "https://raw.githubusercontent.com/relayced/Hexagon/main/version.txt"
 	LogFileName   = "farming_log.txt"
 
