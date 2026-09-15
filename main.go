@@ -3494,11 +3494,6 @@ func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
 
 	installedVer := getDisplayDeltaVersion()
 
-	currTime := time.Now().Format("15:04:05")
-	safeLog("\n[%s] %s[ABORT]%s Delta Upgrade detected (%s)! Reason: %s",
-		currTime, Red, NC, ver, reason)
-	safeLog("  %s[INFO]%s Immediately stopping clone joining process as clients cannot connect.", Amber, NC)
-	safeLog("  %s[INFO]%s Detected Installed Client: %s", Cyan, NC, installedVer)
 	writeLog("DELTA_UPGRADE_ABORT", fmt.Sprintf("Joining stopped: %s (Installed: %s, Reason: %s)", ver, installedVer, reason))
 
 	stopList := pkgsToStop
@@ -3526,10 +3521,59 @@ func handleDeltaUpgradeAbort(reason string, pkgsToStop []string) {
 			15158332, fields)
 	}
 
-	drawAlertCard("ERROR", "[!] DELTA UPGRADE REQUIRED - JOINING STOPPED",
-		fmt.Sprintf("Required: %s | Installed: %s", ver, installedVer),
-		"Roblox is out of date and cannot connect.",
-		fmt.Sprintf("Download APK: %s", DeltaDownloadURL))
+	clearTerminal()
+	termW, termH := detectTerminalSize()
+
+	rows := []BoxRow{
+		{
+			Type:        RowCentered,
+			CustomText:  "[!] DELTA UPGRADE REQUIRED - JOINING STOPPED",
+			CustomColor: Bold + Red,
+		},
+		{Type: RowSeparator},
+		{
+			Type:       RowKeyValue,
+			Label:      "Latest Delta : ",
+			LabelColor: Gray,
+			Value:      ver,
+			ValueColor: Bold + White,
+		},
+		{
+			Type:       RowKeyValue,
+			Label:      "Installed APK: ",
+			LabelColor: Gray,
+			Value:      installedVer + " (Outdated)",
+			ValueColor: Bold + Amber,
+		},
+		{
+			Type:       RowKeyValue,
+			Label:      "Trigger      : ",
+			LabelColor: Gray,
+			Value:      reason,
+			ValueColor: Red,
+		},
+		{Type: RowSeparator},
+		{
+			Type:        RowSubtitle,
+			CustomText:  "• Roblox has forced an upgrade; outdated clients cannot join.",
+			CustomColor: Dim,
+		},
+		{
+			Type:        RowSubtitle,
+			CustomText:  "• Please update your Delta clone APKs before running.",
+			CustomColor: White,
+		},
+		{
+			Type:       RowKeyValue,
+			Label:      "Download APK : ",
+			LabelColor: Gray,
+			Value:      DeltaDownloadURL,
+			ValueColor: Cyan,
+		},
+	}
+
+	box := renderCenteredBox("ALERT", rows, termW, termH, Red)
+	fmt.Print(box)
 
 	pad := getMenuLeftPad()
 	fmt.Printf("\n%s%s[!] Joining halted. Update your Delta clones and rerun Nefarious.%s\n\n", pad, Bold+Red, NC)
@@ -5321,8 +5365,6 @@ func main() {
 	hideSoftKeyboard()
 
 	if !launched {
-		safeLog("\n%s[STOPPED]%s Joining aborted due to Delta/Roblox upgrade. Exiting.", Red, NC)
-		fmt.Printf("\n%s[STOPPED] Joining process halted. Please update your Delta clone APKs before continuing.%s\n\n", Red, NC)
 		return
 	}
 
